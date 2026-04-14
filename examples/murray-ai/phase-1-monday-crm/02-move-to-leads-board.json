@@ -1,0 +1,151 @@
+{
+  "name": "Murray AI — P1.2 Move to Leads Board",
+  "nodes": [
+    {
+      "id": "sticky-002",
+      "name": "Placeholders to Swap",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-560, -380],
+      "parameters": {
+        "content": "## Phase 1.2 — Move to Leads Board\n\nCreates a new item in Leads Board / `new_pipeline` group with status `Contacted`.\n\n**Inputs:** `lead_name`, `email`, `send_date` (YYYY-MM-DD), `subject_line`, `email_body_snippet`, `thread_id` (Gmail thread id from Phase 3 send).\n\n### Env vars\n- `MONDAY_LEADS_BOARD_ID`\n\n### Group ID placeholder\n- `new_pipeline`\n\n### Column ID placeholders (Leads Board)\n- `lead_name` (text)\n- `email` (email)\n- `status` (dropdown)\n- `send_date` (date)\n- `subject_line_used` (text)\n- `email_body_snippet` (long text)\n- `thread_id` (text)  ← added per Phase 3 plan\n- `follow_up_1_sent` (checkbox, initialized false)\n- `follow_up_2_sent` (checkbox, initialized false)\n\n### Output\n`{ item_id, success }`",
+        "height": 560,
+        "width": 420
+      }
+    },
+    {
+      "id": "trigger-002",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-560, 0],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            { "name": "lead_name", "type": "string" },
+            { "name": "email", "type": "string" },
+            { "name": "send_date", "type": "string" },
+            { "name": "subject_line", "type": "string" },
+            { "name": "email_body_snippet", "type": "string" },
+            { "name": "thread_id", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "build-002",
+      "name": "Build GraphQL Body",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-300, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $groupId: String!, $itemName: String!, $columnValues: JSON!) { create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName, column_values: $columnValues, create_labels_if_missing: true) { id name } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    groupId: 'new_pipeline',\n    itemName: $json.lead_name,\n    columnValues: JSON.stringify({\n      lead_name: $json.lead_name,\n      email: { email: $json.email, text: $json.email },\n      status: { label: 'Contacted' },\n      send_date: { date: $json.send_date || $now.toFormat('yyyy-MM-dd') },\n      subject_line_used: (($json.subject_line || '').substring(0, 255)),\n      email_body_snippet: (($json.email_body_snippet || '').substring(0, 200)),\n      thread_id: ($json.thread_id || ''),\n      follow_up_1_sent: false,\n      follow_up_2_sent: false\n    })\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-002",
+      "name": "Monday - Create Leads Item",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-40, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "guard-002",
+      "name": "Did It Succeed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [220, 0],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data && $json.data.create_item && $json.data.create_item.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "exists", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "out-ok-002",
+      "name": "Output Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, -120],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "item_id", "type": "string", "value": "={{ $json.data.create_item.id }}" },
+            { "id": "a2", "name": "success", "type": "boolean", "value": "={{ true }}" }
+          ]
+        },
+        "options": { "include": "none" }
+      }
+    },
+    {
+      "id": "out-fail-002",
+      "name": "Output Failure",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 120],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "b1", "name": "item_id", "type": "string", "value": "" },
+            { "id": "b2", "name": "success", "type": "boolean", "value": "={{ false }}" },
+            { "id": "b3", "name": "error", "type": "string", "value": "={{ JSON.stringify($json.errors || $json) }}" }
+          ]
+        },
+        "options": { "include": "none" }
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [[{ "node": "Build GraphQL Body", "type": "main", "index": 0 }]]
+    },
+    "Build GraphQL Body": {
+      "main": [[{ "node": "Monday - Create Leads Item", "type": "main", "index": 0 }]]
+    },
+    "Monday - Create Leads Item": {
+      "main": [[{ "node": "Did It Succeed?", "type": "main", "index": 0 }]]
+    },
+    "Did It Succeed?": {
+      "main": [
+        [{ "node": "Output Success", "type": "main", "index": 0 }],
+        [{ "node": "Output Failure", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-1" }]
+}

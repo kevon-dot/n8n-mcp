@@ -1,0 +1,97 @@
+{
+  "name": "Murray AI — P1.4 Check Duplicate",
+  "nodes": [
+    {
+      "id": "sticky-004",
+      "name": "Placeholders to Swap",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-560, -400],
+      "parameters": {
+        "content": "## Phase 1.4 — Check Duplicate\n\nOne batched GraphQL request queries both boards for:\n1. an existing item whose `email` column matches the input email, AND\n2. an existing item matching `lead_name` + `company` (item name contains lead_name AND `company` column contains company).\n\nReturns `{ is_duplicate: true|false }`.\n\n**Inputs:** `email`, `lead_name`, `company`\n\n### Env vars\n- `MONDAY_CONTACTS_BOARD_ID`\n- `MONDAY_LEADS_BOARD_ID`\n\n### Column ID placeholders\n- `email` (both boards)\n- `company` (both boards) — text column\n- item `name` is Monday's built-in item name field, do not change\n\n### Notes\n- If `email` is empty, only the name+company check runs.\n- The `contains_text` operator on `query_params.rules` is case-insensitive substring match — tighten later if you see false positives.",
+        "height": 560,
+        "width": 440
+      }
+    },
+    {
+      "id": "trigger-004",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-560, 0],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            { "name": "email", "type": "string" },
+            { "name": "lead_name", "type": "string" },
+            { "name": "company", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "build-004",
+      "name": "Build Batched Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-300, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($contactsBoardId: ID!, $leadsBoardId: ID!, $email: String!, $leadName: String!, $company: String!) {\\n  contactsByEmail: items_page_by_column_values(board_id: $contactsBoardId, columns: [{ column_id: \"email\", column_values: [$email] }], limit: 1) { items { id } }\\n  leadsByEmail: items_page_by_column_values(board_id: $leadsBoardId, columns: [{ column_id: \"email\", column_values: [$email] }], limit: 1) { items { id } }\\n  contactsByName: boards(ids: [$contactsBoardId]) { items_page(query_params: { rules: [{ column_id: \"name\", compare_value: [$leadName], operator: contains_text }, { column_id: \"company\", compare_value: [$company], operator: contains_text }], operator: and }, limit: 1) { items { id } } }\\n  leadsByName: boards(ids: [$leadsBoardId]) { items_page(query_params: { rules: [{ column_id: \"name\", compare_value: [$leadName], operator: contains_text }, { column_id: \"company\", compare_value: [$company], operator: contains_text }], operator: and }, limit: 1) { items { id } } }\\n}',\n  variables: {\n    contactsBoardId: $env.MONDAY_CONTACTS_BOARD_ID,\n    leadsBoardId: $env.MONDAY_LEADS_BOARD_ID,\n    email: ($json.email || 'NO_EMAIL_PROVIDED_SENTINEL_VALUE'),\n    leadName: ($json.lead_name || ''),\n    company: ($json.company || '')\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-004",
+      "name": "Monday - Run Duplicate Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-40, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "eval-004",
+      "name": "Evaluate Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const data = $json.data || {};\n\nconst hits = (key, path) => {\n  const node = data[key];\n  if (!node) return 0;\n  if (path === 'direct') return (node.items || []).length;\n  if (path === 'boards') return ((node[0] || {}).items_page || {}).items ? node[0].items_page.items.length : 0;\n  return 0;\n};\n\nconst emailDupContacts = hits('contactsByEmail', 'direct');\nconst emailDupLeads = hits('leadsByEmail', 'direct');\nconst nameDupContacts = hits('contactsByName', 'boards');\nconst nameDupLeads = hits('leadsByName', 'boards');\n\nconst is_duplicate = (emailDupContacts + emailDupLeads + nameDupContacts + nameDupLeads) > 0;\n\nreturn [{\n  json: {\n    is_duplicate,\n    matched_on: {\n      email_on_contacts: emailDupContacts > 0,\n      email_on_leads: emailDupLeads > 0,\n      name_and_company_on_contacts: nameDupContacts > 0,\n      name_and_company_on_leads: nameDupLeads > 0\n    },\n    errors: $json.errors || null\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [[{ "node": "Build Batched Query", "type": "main", "index": 0 }]]
+    },
+    "Build Batched Query": {
+      "main": [[{ "node": "Monday - Run Duplicate Check", "type": "main", "index": 0 }]]
+    },
+    "Monday - Run Duplicate Check": {
+      "main": [[{ "node": "Evaluate Result", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-1" }]
+}
