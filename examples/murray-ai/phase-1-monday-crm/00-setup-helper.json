@@ -1,0 +1,100 @@
+{
+  "name": "Murray AI — P1.0 Setup Helper",
+  "nodes": [
+    {
+      "id": "sticky-setup-intro",
+      "name": "Read Me First",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1280, -440],
+      "parameters": {
+        "content": "# Phase 1 — Setup Helper\n\nRun this once to generate the exact `.env` snippet for your Monday boards.\n\n## Step 1 — Create Monday boards (manual, in Monday UI)\n\n**Contacts Board** — one group: \"New Active Contacts\". Columns:\n- Lead Name (text)\n- Email (email)\n- Email Confidence (dropdown: High)\n- Company (text)\n- Source (dropdown: Crunchbase, AngelList)\n- Date Added (date)\n- Status (dropdown: Queued for Outreach, Contacted, Skip)\n\n**Leads Board** — three groups: \"New Pipeline\", \"Qualified Pipe, Reply\", \"No Response\". Columns:\n- Lead Name (text)\n- Email (email)\n- Company (text)\n- Status (dropdown: Contacted, Qualified, No Response)\n- Send Date (date)\n- Subject Line Used (text)\n- Email Body Snippet (long text)\n- Reply Received Date (date)\n- Reply Snippet (long text)\n- Follow Up 1 Sent (checkbox)\n- Follow Up 2 Sent (checkbox)\n- Follow Up 1 Date (date)\n- Thread ID (text)\n\n## Step 2 — Get a Monday API token\nMonday → avatar → Developers → My Access Tokens → Copy.\n\n## Step 3 — Create n8n credential\nn8n → Credentials → New → search \"Monday.com\" → paste token → save.\n\n## Step 4 — Bootstrap env (minimum two vars)\nAdd to `docker-compose.yml` under the n8n service, then `docker compose up -d`:\n\n```yaml\nenvironment:\n  - MONDAY_CONTACTS_BOARD_ID=123456789\n  - MONDAY_LEADS_BOARD_ID=987654321\n```\n\nGet the board IDs from each board's URL: `monday.com/boards/<ID>`.\n\n## Step 5 — Attach credential on this workflow\nOpen the \"Monday - Introspect Boards\" node below and pick the Monday.com credential you made in Step 3.\n\n## Step 6 — Click Execute Workflow\nThe final node outputs `dotenv_snippet` — a ready-to-paste block of every remaining env var (group ids + column ids for both boards). Copy it, paste it into docker-compose, restart n8n, and Phase 1 is live.",
+        "height": 1220,
+        "width": 480
+      }
+    },
+    {
+      "id": "sticky-setup-notes",
+      "name": "After You Paste the Snippet",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [700, -440],
+      "parameters": {
+        "content": "## After pasting the .env snippet\n\n1. `docker compose up -d` to pick up new env.\n2. Verify env vars inside the container: `docker compose exec n8n env | grep MONDAY_`\n3. Smoke test each sub-workflow:\n\n### P1.4 Check Duplicate\nExecute with test data:\n```json\n{ \"email\": \"smoke-test@example.com\",\n  \"lead_name\": \"Smoke Test\",\n  \"company\": \"Test Co\" }\n```\nExpect `{ is_duplicate: false, matched_on: {...all false} }`.\n\n### P1.1 Add to Contacts Board\n```json\n{ \"lead_name\": \"Smoke Test\",\n  \"email\": \"smoke-test@example.com\",\n  \"email_confidence\": \"High\",\n  \"company\": \"Test Co\",\n  \"source\": \"Crunchbase\" }\n```\nExpect `{ item_id: \"<number>\", success: true }`. Check the Contacts Board — you should see a new item.\n\n### P1.4 again with same data\nExpect `{ is_duplicate: true, matched_on: { email_on_contacts: true, ... } }`.\n\n### P1.2 Move to Leads Board\n```json\n{ \"lead_name\": \"Smoke Test\",\n  \"email\": \"smoke-test@example.com\",\n  \"send_date\": \"2026-04-14\",\n  \"subject_line\": \"Test subject\",\n  \"email_body_snippet\": \"Test body...\",\n  \"thread_id\": \"thread-abc-123\" }\n```\nExpect new item on Leads Board, New Pipeline group.\n\n### P1.3 Mark as Qualified\n```json\n{ \"email\": \"smoke-test@example.com\",\n  \"reply_received_date\": \"2026-04-14\",\n  \"reply_snippet\": \"Sounds interesting.\" }\n```\nExpect item moved to Qualified Pipe Reply, status = Qualified.\n\n## Clean up test data\nDelete the Smoke Test item from Monday before Phase 2 goes live.",
+        "height": 1100,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-setup",
+      "name": "Click to Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-740, 0],
+      "parameters": {}
+    },
+    {
+      "id": "build-setup-query",
+      "name": "Build Introspection Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-500, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($ids: [ID!]!) { boards(ids: $ids) { id name groups { id title } columns { id title type } } }',\n  variables: {\n    ids: [\n      $env.MONDAY_CONTACTS_BOARD_ID,\n      $env.MONDAY_LEADS_BOARD_ID\n    ]\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-setup",
+      "name": "Monday - Introspect Boards",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-260, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "map-setup",
+      "name": "Map to .env Snippet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-20, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const resp = $json;\nconst boards = (resp.data && resp.data.boards) || [];\nif (!boards.length) {\n  return [{ json: { error: 'No boards returned. Check your MONDAY_CONTACTS_BOARD_ID / MONDAY_LEADS_BOARD_ID env vars and the attached Monday credential.', raw: resp } }];\n}\n\nconst contactsBoardId = String($env.MONDAY_CONTACTS_BOARD_ID || '');\nconst leadsBoardId = String($env.MONDAY_LEADS_BOARD_ID || '');\nconst contacts = boards.find(b => String(b.id) === contactsBoardId);\nconst leads = boards.find(b => String(b.id) === leadsBoardId);\n\n// Column title -> env var name mapping\nconst CONTACTS_COL_MAP = {\n  'Lead Name': 'MONDAY_CONTACTS_COL_LEAD_NAME',\n  'Email': 'MONDAY_CONTACTS_COL_EMAIL',\n  'Email Confidence': 'MONDAY_CONTACTS_COL_CONFIDENCE',\n  'Company': 'MONDAY_CONTACTS_COL_COMPANY',\n  'Source': 'MONDAY_CONTACTS_COL_SOURCE',\n  'Date Added': 'MONDAY_CONTACTS_COL_DATE_ADDED',\n  'Status': 'MONDAY_CONTACTS_COL_STATUS'\n};\nconst CONTACTS_GROUP_MAP = {\n  'New Active Contacts': 'MONDAY_CONTACTS_GROUP_NEW_ACTIVE'\n};\nconst LEADS_COL_MAP = {\n  'Lead Name': 'MONDAY_LEADS_COL_LEAD_NAME',\n  'Email': 'MONDAY_LEADS_COL_EMAIL',\n  'Company': 'MONDAY_LEADS_COL_COMPANY',\n  'Status': 'MONDAY_LEADS_COL_STATUS',\n  'Send Date': 'MONDAY_LEADS_COL_SEND_DATE',\n  'Subject Line Used': 'MONDAY_LEADS_COL_SUBJECT_LINE',\n  'Email Body Snippet': 'MONDAY_LEADS_COL_BODY_SNIPPET',\n  'Reply Received Date': 'MONDAY_LEADS_COL_REPLY_DATE',\n  'Reply Snippet': 'MONDAY_LEADS_COL_REPLY_SNIPPET',\n  'Follow Up 1 Sent': 'MONDAY_LEADS_COL_FOLLOW_UP_1_SENT',\n  'Follow Up 2 Sent': 'MONDAY_LEADS_COL_FOLLOW_UP_2_SENT',\n  'Follow Up 1 Date': 'MONDAY_LEADS_COL_FOLLOW_UP_1_DATE',\n  'Thread ID': 'MONDAY_LEADS_COL_THREAD_ID'\n};\nconst LEADS_GROUP_MAP = {\n  'New Pipeline': 'MONDAY_LEADS_GROUP_NEW_PIPELINE',\n  'Qualified Pipe, Reply': 'MONDAY_LEADS_GROUP_QUALIFIED_REPLY',\n  'No Response': 'MONDAY_LEADS_GROUP_NO_RESPONSE'\n};\n\nfunction resolve(board, mapObj, kind) {\n  const out = {};\n  const missing = [];\n  const src = kind === 'columns' ? (board && board.columns) || [] : (board && board.groups) || [];\n  const titleKey = kind === 'columns' ? 'title' : 'title';\n  for (const [title, envName] of Object.entries(mapObj)) {\n    const hit = src.find(s => (s[titleKey] || '').trim() === title);\n    if (hit) { out[envName] = hit.id; } else { missing.push(`${envName} (looking for ${kind.slice(0,-1)} titled \"${title}\")`); }\n  }\n  return { out, missing };\n}\n\nconst missing = [];\nconst resolved = {};\nresolved.MONDAY_CONTACTS_BOARD_ID = contactsBoardId;\nresolved.MONDAY_LEADS_BOARD_ID = leadsBoardId;\n\nif (!contacts) missing.push(`Contacts board not found (MONDAY_CONTACTS_BOARD_ID=${contactsBoardId})`);\nif (!leads) missing.push(`Leads board not found (MONDAY_LEADS_BOARD_ID=${leadsBoardId})`);\n\nif (contacts) {\n  const c = resolve(contacts, CONTACTS_GROUP_MAP, 'groups'); Object.assign(resolved, c.out); missing.push(...c.missing);\n  const cc = resolve(contacts, CONTACTS_COL_MAP, 'columns'); Object.assign(resolved, cc.out); missing.push(...cc.missing);\n}\nif (leads) {\n  const l = resolve(leads, LEADS_GROUP_MAP, 'groups'); Object.assign(resolved, l.out); missing.push(...l.missing);\n  const lc = resolve(leads, LEADS_COL_MAP, 'columns'); Object.assign(resolved, lc.out); missing.push(...lc.missing);\n}\n\nconst order = [\n  'MONDAY_CONTACTS_BOARD_ID',\n  'MONDAY_LEADS_BOARD_ID',\n  '',\n  '# Contacts Board',\n  'MONDAY_CONTACTS_GROUP_NEW_ACTIVE',\n  'MONDAY_CONTACTS_COL_LEAD_NAME',\n  'MONDAY_CONTACTS_COL_EMAIL',\n  'MONDAY_CONTACTS_COL_CONFIDENCE',\n  'MONDAY_CONTACTS_COL_COMPANY',\n  'MONDAY_CONTACTS_COL_SOURCE',\n  'MONDAY_CONTACTS_COL_DATE_ADDED',\n  'MONDAY_CONTACTS_COL_STATUS',\n  '',\n  '# Leads Board',\n  'MONDAY_LEADS_GROUP_NEW_PIPELINE',\n  'MONDAY_LEADS_GROUP_QUALIFIED_REPLY',\n  'MONDAY_LEADS_GROUP_NO_RESPONSE',\n  'MONDAY_LEADS_COL_LEAD_NAME',\n  'MONDAY_LEADS_COL_EMAIL',\n  'MONDAY_LEADS_COL_COMPANY',\n  'MONDAY_LEADS_COL_STATUS',\n  'MONDAY_LEADS_COL_SEND_DATE',\n  'MONDAY_LEADS_COL_SUBJECT_LINE',\n  'MONDAY_LEADS_COL_BODY_SNIPPET',\n  'MONDAY_LEADS_COL_REPLY_DATE',\n  'MONDAY_LEADS_COL_REPLY_SNIPPET',\n  'MONDAY_LEADS_COL_FOLLOW_UP_1_SENT',\n  'MONDAY_LEADS_COL_FOLLOW_UP_2_SENT',\n  'MONDAY_LEADS_COL_FOLLOW_UP_1_DATE',\n  'MONDAY_LEADS_COL_THREAD_ID'\n];\n\nconst lines = order.map(k => {\n  if (k === '') return '';\n  if (k.startsWith('#')) return k;\n  const v = resolved[k];\n  return v != null ? `${k}=${v}` : `# ${k}=<MISSING — create this column/group in Monday>`;\n});\n\nconst dotenvSnippet = lines.join('\\n');\nconst yamlSnippet = lines.filter(l => l && !l.startsWith('#')).map(l => `      - ${l}`).join('\\n');\n\nreturn [{\n  json: {\n    status: missing.length === 0 ? 'ok' : 'incomplete',\n    missing,\n    resolved,\n    dotenv_snippet: dotenvSnippet,\n    docker_compose_snippet: `services:\\n  n8n:\\n    environment:\\n${yamlSnippet}`\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Click to Run": {
+      "main": [[{ "node": "Build Introspection Query", "type": "main", "index": 0 }]]
+    },
+    "Build Introspection Query": {
+      "main": [[{ "node": "Monday - Introspect Boards", "type": "main", "index": 0 }]]
+    },
+    "Monday - Introspect Boards": {
+      "main": [[{ "node": "Map to .env Snippet", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-1" }, { "name": "setup" }]
+}
