@@ -74,7 +74,7 @@
         }
       },
       "continueOnFail": true,
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "id": "norm-cb",
@@ -122,7 +122,7 @@
         }
       },
       "continueOnFail": true,
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "id": "norm-wf",
@@ -228,7 +228,7 @@
         }
       },
       "continueOnFail": true,
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "id": "if-confidence",
@@ -391,6 +391,80 @@
         "jsonBody": "={{ JSON.stringify({\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `Lead queue has exceeded ${$json.threshold}. Currently ${$json.queue_count} contacts in Queued for Outreach. Review before next batch.`\n}) }}",
         "options": {}
       }
+    },
+    {
+      "id": "build-alert-cb",
+      "name": "Build Alert — Crunchbase Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-300, -380],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Apify',\n  sub_provider: 'Crunchbase actor',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P2.1 Daily Lead Sourcing',\n  node_name: 'Apify - Crunchbase Actor',\n  context: 'Daily investor lead fetch from Apify Crunchbase actor',\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-alert-wf",
+      "name": "Build Alert — Wellfound Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-300, 380],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Apify',\n  sub_provider: 'Wellfound actor',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P2.1 Daily Lead Sourcing',\n  node_name: 'Apify - Wellfound Actor',\n  context: 'Daily investor lead fetch from Apify Wellfound actor',\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-alert-hunter",
+      "name": "Build Alert — Hunter Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1260, -320],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Hunter',\n  sub_provider: 'Email finder',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P2.1 Daily Lead Sourcing',\n  node_name: 'Hunter.io - Email Finder',\n  context: `Enriching lead ${$('Loop Over Leads').item.json.full_name} at ${$('Loop Over Leads').item.json.domain}`,\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-p51-alert",
+      "name": "Call P5.1 API Error Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1520, 0],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_5_API_ERROR_ALERT_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "provider": "={{ $json.provider }}",
+            "sub_provider": "={{ $json.sub_provider }}",
+            "status_code": "={{ $json.status_code }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "node_name": "={{ $json.node_name }}",
+            "context": "={{ $json.context }}",
+            "error_body": "={{ $json.error_body }}"
+          },
+          "schema": [
+            { "id": "provider", "type": "string", "displayName": "provider" },
+            { "id": "sub_provider", "type": "string", "displayName": "sub_provider" },
+            { "id": "status_code", "type": "number", "displayName": "status_code" },
+            { "id": "workflow_name", "type": "string", "displayName": "workflow_name" },
+            { "id": "node_name", "type": "string", "displayName": "node_name" },
+            { "id": "context", "type": "string", "displayName": "context" },
+            { "id": "error_body", "type": "string", "displayName": "error_body" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -407,7 +481,10 @@
       "main": [[{ "node": "Apify - Crunchbase Actor", "type": "main", "index": 0 }]]
     },
     "Apify - Crunchbase Actor": {
-      "main": [[{ "node": "Normalize Crunchbase", "type": "main", "index": 0 }]]
+      "main": [
+        [{ "node": "Normalize Crunchbase", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Crunchbase Fail", "type": "main", "index": 0 }]
+      ]
     },
     "Normalize Crunchbase": {
       "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 0 }]]
@@ -416,7 +493,10 @@
       "main": [[{ "node": "Apify - Wellfound Actor", "type": "main", "index": 0 }]]
     },
     "Apify - Wellfound Actor": {
-      "main": [[{ "node": "Normalize Wellfound", "type": "main", "index": 0 }]]
+      "main": [
+        [{ "node": "Normalize Wellfound", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Wellfound Fail", "type": "main", "index": 0 }]
+      ]
     },
     "Normalize Wellfound": {
       "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 1 }]]
@@ -440,8 +520,14 @@
       ]
     },
     "Hunter.io - Email Finder": {
-      "main": [[{ "node": "Confidence >= Threshold?", "type": "main", "index": 0 }]]
+      "main": [
+        [{ "node": "Confidence >= Threshold?", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Hunter Fail", "type": "main", "index": 0 }]
+      ]
     },
+    "Build Alert — Crunchbase Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
+    "Build Alert — Wellfound Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
+    "Build Alert — Hunter Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
     "Confidence >= Threshold?": {
       "main": [
         [{ "node": "Build Add to Contacts Payload", "type": "main", "index": 0 }],
