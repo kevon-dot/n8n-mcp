@@ -8,7 +8,7 @@
       "typeVersion": 1,
       "position": [-1900, -480],
       "parameters": {
-        "content": "# Phase 4.2 — Slack Approval Handler\n\nReceives Slack events for the approval channel `SLACK_APPROVAL_CHANNEL_ID` (private outreach-approvals channel only). Routes:\n\n- `:white_check_mark:` reaction by approver -> send Claude draft as Gmail reply in original thread.\n- Threaded message reply by approver -> send the message text as Gmail reply (overrides Claude draft).\n- `:x:` reaction by approver -> mark lead as `Needs Manual Handling` in Monday, post confirmation to approval channel.\n\nAll routing context (gmail thread id, lead email, claude draft) lives in **Slack message metadata** posted by Phase 4.1. We fetch the parent message via `conversations.history` to read it.\n\n## Required env\n```\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_SENDER=kevon@trymurmurai.app\n```\n\n## Slack app setup\n1. In the Slack app config -> Event Subscriptions -> enable.\n2. Request URL: paste the Production URL of the Slack Trigger below (n8n shows it after activating).\n3. Subscribe bot events: `reaction_added`, `message.groups` (private channel messages).\n4. Bot scopes (OAuth & Permissions): `chat:write`, `groups:history`, `reactions:read`.\n5. Reinstall the app to your workspace, invite the bot to `C0ASZ6R2K6E`.\n6. Activate this workflow in n8n.\n\n## Why messages go through `conversations.history`\nReaction events only carry message `ts`, channel, user, and reaction name. The original Claude draft + Gmail thread id are in the parent message's metadata. We must fetch the message to read it.\n\n## Channel discipline\n- This workflow ONLY listens to `SLACK_APPROVAL_CHANNEL_ID` (C0ASZ6R2K6E).\n- It posts confirmations back to the same approval channel.\n- It NEVER touches `SLACK_ALERT_CHANNEL_ID` (C0AR99Q4ZUP). Channel-mixing is impossible by design.",
+        "content": "# Phase 4.2 — Slack Approval Handler\n\nReceives Slack events for the approval channel `SLACK_APPROVAL_CHANNEL_ID` (private outreach-approvals channel only). Routes:\n\n- `:white_check_mark:` reaction by approver -> send Claude draft as Gmail reply in original thread.\n- Threaded message reply by approver -> send the message text as Gmail reply (overrides Claude draft).\n- `:x:` reaction by approver -> mark lead as `Needs Manual Handling` in Monday, post confirmation to approval channel.\n\n## Routing source: Monday Leads Board, NOT Slack metadata\nWhen Phase 4.1 posted the approval card, it persisted the message `ts` + Claude draft to the lead's row on the Leads Board (`Approval Slack TS`, `Pending Draft` columns). This workflow looks the lead up by `ts` and reads gmail thread id, lead email, subject, and pending draft from the row directly. Works on every Slack workspace tier including Free.\n\nAfter a successful send (or mark manual), the two pending columns are cleared so a duplicate reaction won't re-fire.\n\n## Required env\n```\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_SENDER=kevon@trymurmurai.app\nMONDAY_COL_LEAD_APPROVAL_SLACK_TS=...\nMONDAY_COL_LEAD_PENDING_DRAFT=...\n```\n\n## Slack app setup\n1. In the Slack app config -> Event Subscriptions -> enable.\n2. Request URL: paste the Production URL of the Slack Trigger below (n8n shows it after activating).\n3. Subscribe bot events: `reaction_added`, `message.groups` (private channel messages).\n4. Bot scopes (OAuth & Permissions): `chat:write`, `reactions:read`.\n   - `groups:history` and `metadata:read` are NO LONGER REQUIRED.\n5. Reinstall the app, invite the bot to `C0ASZ6R2K6E`.\n6. Activate this workflow in n8n.\n\n## Channel discipline\n- This workflow ONLY listens to `SLACK_APPROVAL_CHANNEL_ID` (C0ASZ6R2K6E).\n- It posts confirmations back to the same approval channel.\n- It NEVER touches `SLACK_ALERT_CHANNEL_ID` (C0AR99Q4ZUP). Channel-mixing is impossible by design.",
         "height": 1080,
         "width": 460
       }
@@ -36,66 +36,53 @@
       }
     },
     {
-      "id": "build-history-q",
-      "name": "Build History Lookup",
+      "id": "build-monday-lookup",
+      "name": "Build Monday Lookup",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [-820, 0],
       "parameters": {
-        "mode": "manual",
-        "assignments": {
-          "assignments": [
-            { "id": "h1", "name": "channel", "type": "string", "value": "={{ $json.channel }}" },
-            { "id": "h2", "name": "latest", "type": "string", "value": "={{ $json.target_ts }}" },
-            { "id": "h3", "name": "oldest", "type": "string", "value": "={{ $json.target_ts }}" },
-            { "id": "h4", "name": "inclusive", "type": "string", "value": "true" },
-            { "id": "h5", "name": "include_all_metadata", "type": "string", "value": "true" },
-            { "id": "h6", "name": "limit", "type": "string", "value": "1" },
-            { "id": "h7", "name": "_route", "type": "string", "value": "={{ $json.route }}" },
-            { "id": "h8", "name": "_edited_text", "type": "string", "value": "={{ $json.edited_text || '' }}" }
-          ]
-        },
-        "options": { "include": "none" }
-      }
-    },
-    {
-      "id": "http-history",
-      "name": "Slack - Fetch Parent Message",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [-560, 0],
-      "parameters": {
-        "method": "GET",
-        "url": "https://slack.com/api/conversations.history",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" }
-          ]
-        },
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            { "name": "channel", "value": "={{ $json.channel }}" },
-            { "name": "latest", "value": "={{ $json.latest }}" },
-            { "name": "oldest", "value": "={{ $json.oldest }}" },
-            { "name": "inclusive", "value": "={{ $json.inclusive }}" },
-            { "name": "include_all_metadata", "value": "={{ $json.include_all_metadata }}" },
-            { "name": "limit", "value": "={{ $json.limit }}" }
-          ]
-        },
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $approvalCol: String!, $ts: String!) { items_page_by_column_values(board_id: $boardId, columns: [{ column_id: $approvalCol, column_values: [$ts] }], limit: 1) { items { id name column_values { id text value } } } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    approvalCol: $env.MONDAY_COL_LEAD_APPROVAL_SLACK_TS,\n    ts: String($json.target_ts || '')\n  },\n  _route: $json.route,\n  _edited_text: $json.edited_text || '',\n  _channel: $json.channel,\n  _target_ts: $json.target_ts\n}) }}",
         "options": {}
       }
     },
     {
-      "id": "extract-metadata",
-      "name": "Extract Metadata + Route",
+      "id": "http-monday-lookup",
+      "name": "Monday - Lookup By Approval TS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, variables: $json.variables }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "extract-lead-context",
+      "name": "Extract Lead Context",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [-300, 0],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const msgs = $json.messages || [];\nconst lookup = $('Build History Lookup').item.json;\nif (!msgs.length) return [];\nconst msg = msgs[0];\nconst meta = msg.metadata || {};\nif (meta.event_type !== 'outreach_approval') return [];\nconst payload = meta.event_payload || {};\nreturn [{ json: {\n  route: lookup._route,\n  edited_text: lookup._edited_text || '',\n  gmail_thread_id: payload.gmail_thread_id,\n  gmail_message_id: payload.gmail_message_id,\n  lead_email: payload.lead_email,\n  sender_email: payload.sender_email,\n  sender_name: payload.sender_name,\n  leads_item_id: payload.leads_item_id,\n  subject: payload.subject,\n  claude_draft: payload.claude_draft,\n  channel: lookup.channel,\n  approval_ts: lookup.latest\n}}];"
+        "jsCode": "// Look up the Leads row whose Approval Slack TS matches the event's ts.\n// All routing context (gmail thread id, lead email/name, subject,\n// pending Claude draft) lives on this row -- no Slack metadata needed.\nconst items = ((($json.data || {}).items_page_by_column_values) || {}).items || [];\nconst lookup = $('Build Monday Lookup').item.json;\nif (!items.length) {\n  // No matching pending approval (already handled, or stale event). Drop.\n  return [];\n}\nconst lead = items[0];\nfunction colVal(item, colId) { const c = (item.column_values || []).find(c => c.id === colId); return c ? (c.text || '') : ''; }\nconst leadName = colVal(lead, $env.MONDAY_COL_LEAD_NAME) || lead.name;\nconst leadEmail = colVal(lead, $env.MONDAY_COL_LEAD_EMAIL);\nreturn [{ json: {\n  route: lookup._route,\n  edited_text: lookup._edited_text || '',\n  leads_item_id: lead.id,\n  lead_name: leadName,\n  lead_email: leadEmail,\n  // sender_* aliases preserved for downstream nodes that already reference them\n  sender_name: leadName,\n  sender_email: leadEmail,\n  gmail_thread_id: colVal(lead, $env.MONDAY_COL_LEAD_THREAD_ID),\n  subject: colVal(lead, $env.MONDAY_COL_LEAD_SUBJECT_LINE),\n  claude_draft: colVal(lead, $env.MONDAY_COL_LEAD_PENDING_DRAFT),\n  channel: lookup._channel,\n  approval_ts: lookup._target_ts\n}}];"
       }
     },
     {
@@ -176,6 +163,47 @@
       }
     },
     {
+      "id": "build-clear-pending-sent",
+      "name": "Build Clear Pending (Sent)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [620, -300],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $('Extract Lead Context').item.json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_APPROVAL_SLACK_TS]: '',\n      [$env.MONDAY_COL_LEAD_PENDING_DRAFT]: ''\n    })\n  },\n  _ctx: { channel: $('Extract Lead Context').item.json.channel, approval_ts: $('Extract Lead Context').item.json.approval_ts, sender_name: $('Extract Lead Context').item.json.sender_name, route: $('Extract Lead Context').item.json.route }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-clear-pending-sent",
+      "name": "Monday - Clear Pending (Sent)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [620, -160],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, variables: $json.variables }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
       "id": "build-confirm-sent",
       "name": "Build Sent Confirmation",
       "type": "n8n-nodes-base.set",
@@ -183,7 +211,7 @@
       "position": [760, -160],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  channel: $json.channel,\n  thread_ts: $json.approval_ts,\n  text: $json.route === 'send_edited'\n    ? `Sent your edited version to ${$json.sender_name}.`\n    : `Sent to ${$json.sender_name}.`\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $('Extract Lead Context').item.json.channel,\n  thread_ts: $('Extract Lead Context').item.json.approval_ts,\n  text: $('Extract Lead Context').item.json.route === 'send_edited'\n    ? `Sent your edited version to ${$('Extract Lead Context').item.json.sender_name}.`\n    : `Sent to ${$('Extract Lead Context').item.json.sender_name}.`\n}) }}",
         "options": {}
       }
     },
@@ -217,7 +245,7 @@
       "position": [240, 200],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_STATUS]: { label: 'Needs Manual Handling' }\n    })\n  },\n  _ctx: { channel: $json.channel, approval_ts: $json.approval_ts, sender_name: $json.sender_name }\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_STATUS]: { label: 'Needs Manual Handling' },\n      [$env.MONDAY_COL_LEAD_APPROVAL_SLACK_TS]: '',\n      [$env.MONDAY_COL_LEAD_PENDING_DRAFT]: ''\n    })\n  },\n  _ctx: { channel: $json.channel, approval_ts: $json.approval_ts, sender_name: $json.sender_name }\n}) }}",
         "options": {}
       }
     },
@@ -282,10 +310,10 @@
   ],
   "connections": {
     "Slack Trigger": { "main": [[{ "node": "Route Event", "type": "main", "index": 0 }]] },
-    "Route Event": { "main": [[{ "node": "Build History Lookup", "type": "main", "index": 0 }]] },
-    "Build History Lookup": { "main": [[{ "node": "Slack - Fetch Parent Message", "type": "main", "index": 0 }]] },
-    "Slack - Fetch Parent Message": { "main": [[{ "node": "Extract Metadata + Route", "type": "main", "index": 0 }]] },
-    "Extract Metadata + Route": { "main": [[{ "node": "Switch Route", "type": "main", "index": 0 }]] },
+    "Route Event": { "main": [[{ "node": "Build Monday Lookup", "type": "main", "index": 0 }]] },
+    "Build Monday Lookup": { "main": [[{ "node": "Monday - Lookup By Approval TS", "type": "main", "index": 0 }]] },
+    "Monday - Lookup By Approval TS": { "main": [[{ "node": "Extract Lead Context", "type": "main", "index": 0 }]] },
+    "Extract Lead Context": { "main": [[{ "node": "Switch Route", "type": "main", "index": 0 }]] },
     "Switch Route": {
       "main": [
         [{ "node": "Build Final Body (As Is or Edited)", "type": "main", "index": 0 }],
@@ -294,7 +322,9 @@
       ]
     },
     "Build Final Body (As Is or Edited)": { "main": [[{ "node": "Gmail - Send Reply In Thread", "type": "main", "index": 0 }]] },
-    "Gmail - Send Reply In Thread": { "main": [[{ "node": "Build Sent Confirmation", "type": "main", "index": 0 }]] },
+    "Gmail - Send Reply In Thread": { "main": [[{ "node": "Build Clear Pending (Sent)", "type": "main", "index": 0 }]] },
+    "Build Clear Pending (Sent)": { "main": [[{ "node": "Monday - Clear Pending (Sent)", "type": "main", "index": 0 }]] },
+    "Monday - Clear Pending (Sent)": { "main": [[{ "node": "Build Sent Confirmation", "type": "main", "index": 0 }]] },
     "Build Sent Confirmation": { "main": [[{ "node": "Slack - Confirm Sent", "type": "main", "index": 0 }]] },
     "Build Mark Manual": { "main": [[{ "node": "Monday - Mark Manual", "type": "main", "index": 0 }]] },
     "Monday - Mark Manual": { "main": [[{ "node": "Build Manual Confirmation", "type": "main", "index": 0 }]] },
