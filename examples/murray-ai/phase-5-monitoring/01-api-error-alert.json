@@ -1,0 +1,103 @@
+{
+  "name": "Murray AI — P5.1 API Error Alert",
+  "nodes": [
+    {
+      "id": "sticky-p51",
+      "name": "Phase 5.1 Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-720, -360],
+      "parameters": {
+        "content": "# Phase 5.1 — API Error Alert (reusable sub-workflow)\n\nCalled by every pipeline workflow whenever an external API call fails in a way that warrants a human-visible alert (credits out, auth busted, rate limit, provider outage). The classifier inspects provider + HTTP status + body and produces a Slack alert with:\n- Which provider failed\n- Most likely cause (credits / auth / rate limit / overloaded / network)\n- Suggested action\n- Originating workflow + node + context\n- First 300 chars of the response body\n\nPosts ONLY to `SLACK_ALERT_CHANNEL_ID` (C0AR99Q4ZUP). Never the approval channel.\n\n## Inputs\n| field | type | required | example |\n|---|---|---|---|\n| `provider` | string | yes | `Apify` \\| `Hunter` \\| `Anthropic` \\| `Monday` |\n| `sub_provider` | string | no | `Crunchbase actor` |\n| `status_code` | number | no | `402`, `429`, `0` for network |\n| `workflow_name` | string | yes | `P2.1 Daily Lead Sourcing` |\n| `node_name` | string | yes | `Apify - Crunchbase Actor` |\n| `context` | string | no | `Daily lead fetch` |\n| `error_body` | string | no | first 300 chars of response |\n\n## Output\n`{ posted: true|false, ts: '<slack ts>' }`\n\n## Required env\n- `SLACK_BOT_TOKEN`\n- `SLACK_ALERT_CHANNEL_ID`\n\nAfter you import this workflow, copy its workflow id from the URL and set:\n`PHASE_5_API_ERROR_ALERT_WORKFLOW_ID=<id>`\nin docker-compose.yml so the other workflows can call it.",
+        "height": 780,
+        "width": 440
+      }
+    },
+    {
+      "id": "trigger-p51",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-720, 0],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            { "name": "provider", "type": "string" },
+            { "name": "sub_provider", "type": "string" },
+            { "name": "status_code", "type": "number" },
+            { "name": "workflow_name", "type": "string" },
+            { "name": "node_name", "type": "string" },
+            { "name": "context", "type": "string" },
+            { "name": "error_body", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "classify",
+      "name": "Classify Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-460, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Map (provider, status_code, body) -> (severity, cause, action).\n// Provider-aware so we can surface provider-specific error vocabulary.\n\nconst inp = $json;\nconst provider = (inp.provider || 'Unknown').trim();\nconst sub = (inp.sub_provider || '').trim();\nconst status = Number(inp.status_code || 0);\nconst body = String(inp.error_body || '').slice(0, 300);\nconst ctx = inp.context || '';\n\nlet severity = 'warn';\nlet cause = 'Unknown error';\nlet action = 'Check the latest n8n execution for details.';\n\n// Network / timeout (no status code surfaced)\nif (!status || status === 0) {\n  severity = 'warn';\n  cause = 'Network timeout or connection failure.';\n  action = 'Transient. If it keeps happening, check n8n container network and the provider status page.';\n}\n// 401 / 403 auth\nelse if (status === 401 || status === 403) {\n  severity = 'critical';\n  cause = `${provider} rejected the request as unauthorized (${status}).`;\n  action = `Rotate and update the ${provider.toLowerCase()} API key/token in docker-compose.yml, then docker compose up -d.`;\n}\n// 402 payment required (credits out)\nelse if (status === 402) {\n  severity = 'critical';\n  cause = `${provider} billing: credits exhausted (402 Payment Required).`;\n  action = `Top up ${provider} balance. The pipeline will keep failing until the account is funded.`;\n}\n// 429 rate limit\nelse if (status === 429) {\n  severity = 'warn';\n  cause = `${provider} rate-limited the request (429).`;\n  action = 'Transient. n8n retry usually handles it. If it persists, reduce batch sizes or move to a higher plan.';\n}\n// 529 Anthropic overloaded\nelse if (status === 529) {\n  severity = 'warn';\n  cause = 'Anthropic is temporarily overloaded (529).';\n  action = 'Transient on their side. Retry in a few minutes.';\n}\n// 5xx provider outage\nelse if (status >= 500 && status < 600) {\n  severity = 'warn';\n  cause = `${provider} returned a server error (${status}).`;\n  action = `Likely a ${provider} outage. Check their status page; retries should recover automatically.`;\n}\n// 400 bad request\nelse if (status === 400) {\n  severity = 'critical';\n  cause = `${provider} rejected the request as malformed (400).`;\n  action = 'Likely a workflow bug (wrong field name, missing required param, stale actor input schema). Check the error body below.';\n}\n// Monday-specific: 200 with errors array\nelse if (provider === 'Monday' && /\"errors\"/.test(body)) {\n  severity = 'critical';\n  cause = 'Monday returned a GraphQL error despite HTTP 200.';\n  action = 'Check the error body. Common causes: stale column id, unknown group id, column_values shape mismatch.';\n}\n\nconst providerLabel = sub ? `${provider} (${sub})` : provider;\nconst emoji = severity === 'critical' ? ':rotating_light:' : ':warning:';\nconst title = `${emoji} *${providerLabel} failure* — ${cause}`;\nconst text = `${title}\\n\\n*Workflow*: ${inp.workflow_name || 'unknown'}\\n*Node*: ${inp.node_name || 'unknown'}\\n*Context*: ${ctx || '-'}\\n*HTTP*: ${status || 'no status'}\\n*Action*: ${action}\\n${body ? '\\n*Response body (first 300 chars)*:\\n```' + body + '```' : ''}`;\n\nreturn [{ json: {\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text,\n  _severity: severity,\n  _cause: cause,\n  _action: action,\n  _provider_label: providerLabel\n}}];"
+      }
+    },
+    {
+      "id": "http-post",
+      "name": "Slack - Post Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "out",
+      "name": "Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [60, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "o1", "name": "posted", "type": "boolean", "value": "={{ !!($json.ok) }}" },
+            { "id": "o2", "name": "ts", "type": "string", "value": "={{ $json.ts || '' }}" }
+          ]
+        },
+        "options": { "include": "none" }
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": { "main": [[{ "node": "Classify Failure", "type": "main", "index": 0 }]] },
+    "Classify Failure": { "main": [[{ "node": "Slack - Post Alert", "type": "main", "index": 0 }]] },
+    "Slack - Post Alert": { "main": [[{ "node": "Output", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-5" }, { "name": "monitoring" }]
+}
