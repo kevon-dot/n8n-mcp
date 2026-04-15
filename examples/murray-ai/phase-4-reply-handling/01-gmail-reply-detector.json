@@ -8,7 +8,7 @@
       "typeVersion": 1,
       "position": [-1700, -480],
       "parameters": {
-        "content": "# Phase 4.1 — Gmail Reply Detector\n\nGmail Trigger polls every `GMAIL_REPLY_POLL_MINUTES` (default 15). For each new inbound message:\n\n1. Look up the message's `threadId` against the Leads Board `Thread ID` column.\n2. If a match is found and the lead's status != `Qualified`:\n   - Call P1.3 Mark as Qualified (status -> Qualified, group -> Qualified Pipe Reply, write reply snippet + date).\n   - Set Follow Up 1 + 2 Sent = true to halt all follow-up sequences for that lead.\n   - Generate a draft reply via Claude.\n   - Post a structured approval card to **`SLACK_APPROVAL_CHANNEL_ID` only** (the dedicated outreach-approvals private channel). System alerts never go here.\n3. The Slack message includes Slack `metadata` with `gmail_thread_id`, `lead_email`, `lead_name`, and `claude_draft` — Phase 4.2 reads this to route the approval/edit/reject.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_REPLY_POLL_MINUTES=15\nPHASE_1_MARK_AS_QUALIFIED_WORKFLOW_ID=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (kevon@trymurmurai.app)\n- `Monday.com API`\n\n## Slack bot scopes required\n- `chat:write` (post messages)\n- `groups:history` (read messages in private channel for metadata fetch in Phase 4.2)\n- `metadata:read` and the `metadata:write` scope is unnecessary — `chat.postMessage` accepts a `metadata` field with no extra scope\n\n## Idempotency\nGmail Trigger emits each new message exactly once (it tracks history-id internally). Combined with the `lead.status != 'Qualified'` filter, a re-emitted message will still be a no-op.",
+        "content": "# Phase 4.1 — Gmail Reply Detector\n\nGmail Trigger polls every `GMAIL_REPLY_POLL_MINUTES` (default 15). For each new inbound message:\n\n1. Look up the message's `threadId` against the Leads Board `Thread ID` column.\n2. If a match is found and the lead's status != `Qualified`:\n   - Call P1.3 Mark as Qualified (status -> Qualified, group -> Qualified Pipe Reply, write reply snippet + date).\n   - Set Follow Up 1 + 2 Sent = true to halt all follow-up sequences for that lead.\n   - Generate a draft reply via Claude.\n   - Post a structured approval card to **`SLACK_APPROVAL_CHANNEL_ID` only** (dedicated outreach-approvals private channel).\n   - **Persist the Slack message `ts` and the Claude draft to the Leads Board** (columns `Approval Slack TS` and `Pending Draft`). This is the single source of truth for Phase 4.2 routing — no Slack message metadata required.\n\n## Why no Slack metadata\nSlack's `metadata` field on messages is gated to Pro+ workspaces and silently stripped on Free tier. By writing `ts` + `draft` to Monday instead, Phase 4.2 can look up the routing context regardless of Slack tier and works under any Slack app config.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_REPLY_POLL_MINUTES=15\nPHASE_1_MARK_AS_QUALIFIED_WORKFLOW_ID=...\nMONDAY_COL_LEAD_APPROVAL_SLACK_TS=...\nMONDAY_COL_LEAD_PENDING_DRAFT=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (kevon@trymurmurai.app)\n- `Monday.com API`\n\n## Slack bot scopes required\n- `chat:write` (post messages)\n\nNo `groups:history` or metadata scopes needed anymore.\n\n## Idempotency\nGmail Trigger emits each new message exactly once. Combined with the `lead.status != 'Qualified'` filter, a re-emitted message will still be a no-op.",
         "height": 1000,
         "width": 460
       }
@@ -198,7 +198,7 @@
       "position": [680, 0],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ (function(){\n  const ctx = $('Claude Draft System').item.json.context;\n  const draft = ((($json.content || [])[0] || {}).text || '').trim().replace(/[\\u2014\\u2013]/g, ' ').replace(/^\\s*[-*\\u2022]\\s+/gm, '');\n  const text = `NEW REPLY from ${ctx.sender_name} (${ctx.sender_email})\\n\\nTHEIR MESSAGE:\\n${ctx.reply_text}\\n\\nDRAFTED RESPONSE:\\n${draft}\\n\\nReact with :white_check_mark: to send as is\\nReply to this message with your edited version to send your edit instead\\nReact with :x: to skip and handle manually`;\n  return JSON.stringify({\n    channel: $env.SLACK_APPROVAL_CHANNEL_ID,\n    text,\n    metadata: {\n      event_type: 'outreach_approval',\n      event_payload: {\n        gmail_thread_id: ctx.thread_id,\n        gmail_message_id: ctx.message_id,\n        lead_email: ctx.lead_email,\n        sender_email: ctx.sender_email,\n        sender_name: ctx.sender_name,\n        leads_item_id: ctx.leads_item_id,\n        subject: ctx.subject,\n        claude_draft: draft\n      }\n    }\n  });\n})() }}",
+        "jsonOutput": "={{ (function(){\n  const ctx = $('Claude Draft System').item.json.context;\n  const draft = ((($json.content || [])[0] || {}).text || '').trim().replace(/[\\u2014\\u2013]/g, ' ').replace(/^\\s*[-*\\u2022]\\s+/gm, '');\n  const text = `NEW REPLY from ${ctx.sender_name} (${ctx.sender_email})\\n\\nTHEIR MESSAGE:\\n${ctx.reply_text}\\n\\nDRAFTED RESPONSE:\\n${draft}\\n\\nReact with :white_check_mark: to send as is\\nReply to this message with your edited version to send your edit instead\\nReact with :x: to skip and handle manually`;\n  return JSON.stringify({\n    leads_item_id: ctx.leads_item_id,\n    draft,\n    body: {\n      channel: $env.SLACK_APPROVAL_CHANNEL_ID,\n      text\n    }\n  });\n})() }}",
         "options": {}
       }
     },
@@ -220,9 +220,51 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ $json }}",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "build-persist-routing",
+      "name": "Build Persist Routing",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1200, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $('Build Slack Approval Post').item.json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_APPROVAL_SLACK_TS]: String($json.ts || ''),\n      [$env.MONDAY_COL_LEAD_PENDING_DRAFT]: String($('Build Slack Approval Post').item.json.draft || '')\n    })\n  }\n}) }}",
         "options": {}
       }
+    },
+    {
+      "id": "http-persist-routing",
+      "name": "Monday - Persist Routing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1460, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
     }
   ],
   "connections": {
@@ -240,7 +282,9 @@
     "Claude Draft System": { "main": [[{ "node": "Build Claude Draft Request", "type": "main", "index": 0 }]] },
     "Build Claude Draft Request": { "main": [[{ "node": "Anthropic - Draft Reply", "type": "main", "index": 0 }]] },
     "Anthropic - Draft Reply": { "main": [[{ "node": "Build Slack Approval Post", "type": "main", "index": 0 }]] },
-    "Build Slack Approval Post": { "main": [[{ "node": "Slack - Post Approval Card", "type": "main", "index": 0 }]] }
+    "Build Slack Approval Post": { "main": [[{ "node": "Slack - Post Approval Card", "type": "main", "index": 0 }]] },
+    "Slack - Post Approval Card": { "main": [[{ "node": "Build Persist Routing", "type": "main", "index": 0 }]] },
+    "Build Persist Routing": { "main": [[{ "node": "Monday - Persist Routing", "type": "main", "index": 0 }]] }
   },
   "active": false,
   "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
