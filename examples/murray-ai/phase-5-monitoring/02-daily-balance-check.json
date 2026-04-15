@@ -1,0 +1,220 @@
+{
+  "name": "Murray AI — P5.2 Daily Balance Check",
+  "nodes": [
+    {
+      "id": "sticky-p52",
+      "name": "Phase 5.2 Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1400, -380],
+      "parameters": {
+        "content": "# Phase 5.2 — Daily Balance Check\n\nRuns at 5:00 AM PT daily, one hour before the P2.1 lead-sourcing cron fires. Polls provider balance APIs for Apify and Hunter.io. If either is below its configured threshold, posts a proactive warning to `SLACK_ALERT_CHANNEL_ID`.\n\nIntentionally early so Kevon has an hour to top up before the day's outreach pipeline runs.\n\n## Providers checked\n- **Hunter.io** — monthly search quota via `GET /v2/account`\n- **Apify** — remaining monthly USD credits via `GET /v2/users/me`\n\nAnthropic has no public balance API; Claude credit alerts come from the P5.1 reactive path when a call actually fails. Monday has daily complexity limits but no simple balance endpoint; also reactive-only.\n\n## Required env\n```\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_ALERT_CHANNEL_ID=C0AR99Q4ZUP\nHUNTER_API_KEY=...\nAPIFY_TOKEN=apify_api_...\nHUNTER_MIN_REMAINING_REQUESTS=100\nAPIFY_MIN_USD_BALANCE=5\n```\n\n## What the alert looks like\n```\n:rotating_light: Hunter.io balance low\n\n  Remaining searches: 42 / 50\n  Threshold: 100\n  Plan: Free\n\n  Top up: https://hunter.io/users/subscription\n```\n\n## Failure modes\n- If Hunter or Apify is itself unreachable (network or 5xx), that counts as an alert — we post a \"cannot verify balance\" warning so Kevon knows to check manually.\n- continueOnFail on both HTTP calls so a Hunter outage doesn't hide a real Apify warning.",
+        "height": 960,
+        "width": 440
+      }
+    },
+    {
+      "id": "trigger-cron-5-2",
+      "name": "Daily 5:00 AM PT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-900, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 5 * * *" }] }
+      }
+    },
+    {
+      "id": "http-hunter-account",
+      "name": "Hunter - Get Account",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-640, -180],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hunter.io/v2/account",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "eval-hunter",
+      "name": "Evaluate Hunter Balance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, -180],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const data = ($json.data || {});\nconst errors = $json.errors || null;\nconst threshold = parseInt($env.HUNTER_MIN_REMAINING_REQUESTS || '100', 10);\n\n// Unreachable / auth error / malformed response\nif (errors || !data.requests) {\n  return [{ json: {\n    alert: true,\n    channel: $env.SLACK_ALERT_CHANNEL_ID,\n    text: `:warning: *Hunter.io balance check failed* — cannot verify remaining requests.\\n\\n*Likely cause*: API key invalid, Hunter outage, or network issue.\\n*Action*: Check Hunter status and HUNTER_API_KEY in docker-compose.yml. Manually review https://hunter.io/users/subscription before the 6 AM P2.1 run.\\n*Response snippet*: \\`\\`\\`${JSON.stringify($json).slice(0, 300)}\\`\\`\\``\n  }}];\n}\n\nconst searches = data.requests.searches || {};\nconst used = Number(searches.used || 0);\nconst available = Number(searches.available || 0);\nconst remaining = Math.max(0, available - used);\nconst plan = data.plan_name || 'Unknown';\n\nif (remaining >= threshold) {\n  // Healthy -- no alert\n  return [{ json: { alert: false, remaining, threshold, plan } }];\n}\n\nreturn [{ json: {\n  alert: true,\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `:rotating_light: *Hunter.io balance low*\\n\\n*Remaining searches*: ${remaining} of ${available}\\n*Used this period*: ${used}\\n*Threshold*: ${threshold}\\n*Plan*: ${plan}\\n\\n*Action*: Top up at https://hunter.io/users/subscription. Until topped up, P2.1 will drop leads that can't be enriched at >= 0.9 confidence.`\n}}];"
+      }
+    },
+    {
+      "id": "if-hunter-alert",
+      "name": "Hunter Needs Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-120, -180],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "slack-hunter",
+      "name": "Slack - Post Hunter Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [140, -240],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "http-apify-user",
+      "name": "Apify - Get User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-640, 180],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.apify.com/v2/users/me",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "token", "value": "={{ $env.APIFY_TOKEN }}" }
+          ]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "eval-apify",
+      "name": "Evaluate Apify Balance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 180],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Apify /v2/users/me shape has varied across plan tiers and API versions.\n// Extract defensively across known field names; treat missing fields as\n// 'unknown plan' which we also alert on so Kevon can verify manually.\n\nconst data = ($json.data || {});\nconst errors = $json.error || $json.errors || null;\nconst threshold = parseFloat($env.APIFY_MIN_USD_BALANCE || '5');\n\nif (errors || !data || Object.keys(data).length === 0) {\n  return [{ json: {\n    alert: true,\n    channel: $env.SLACK_ALERT_CHANNEL_ID,\n    text: `:warning: *Apify balance check failed* — cannot verify remaining USD credits.\\n\\n*Likely cause*: API token invalid, Apify outage, or network issue.\\n*Action*: Check Apify status and APIFY_TOKEN in docker-compose.yml. Manually review https://console.apify.com/billing before the 6 AM P2.1 run.\\n*Response snippet*: \\`\\`\\`${JSON.stringify($json).slice(0, 300)}\\`\\`\\``\n  }}];\n}\n\nconst plan = data.plan || {};\nconst usage = data.usage || data.usageCycle || {};\n\nconst limitUsd = Number(\n  plan.monthlyUsageLimitUsd != null ? plan.monthlyUsageLimitUsd :\n  plan.maxMonthlyUsageUsd     != null ? plan.maxMonthlyUsageUsd :\n  0\n);\nconst usedUsd = Number(\n  usage.usageUsd                      != null ? usage.usageUsd :\n  usage.currentBillingPeriodUsageUsd  != null ? usage.currentBillingPeriodUsageUsd :\n  0\n);\n\n// If we couldn't find a limit, plan is likely Enterprise/custom -- don't false-alarm.\nif (!limitUsd) {\n  return [{ json: { alert: false, reason: 'unknown_limit', plan_id: plan.id || 'unknown' } }];\n}\n\nconst remainingUsd = Math.max(0, limitUsd - usedUsd);\nif (remainingUsd >= threshold) {\n  return [{ json: { alert: false, remainingUsd, threshold, plan: plan.id || 'unknown' } }];\n}\n\nreturn [{ json: {\n  alert: true,\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `:rotating_light: *Apify balance low*\\n\\n*Remaining*: $${remainingUsd.toFixed(2)} USD\\n*Used this period*: $${usedUsd.toFixed(2)}\\n*Monthly limit*: $${limitUsd.toFixed(2)}\\n*Threshold*: $${threshold.toFixed(2)}\\n*Plan*: ${plan.id || 'unknown'}\\n\\n*Action*: Top up or upgrade at https://console.apify.com/billing. Until then, P2.1's Crunchbase + Wellfound actors may fail to run and drop today's lead sourcing.`\n}}];"
+      }
+    },
+    {
+      "id": "if-apify-alert",
+      "name": "Apify Needs Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-120, 180],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "slack-apify",
+      "name": "Slack - Post Apify Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [140, 120],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Daily 5:00 AM PT": {
+      "main": [[
+        { "node": "Hunter - Get Account", "type": "main", "index": 0 },
+        { "node": "Apify - Get User", "type": "main", "index": 0 }
+      ]]
+    },
+    "Hunter - Get Account": { "main": [[{ "node": "Evaluate Hunter Balance", "type": "main", "index": 0 }]] },
+    "Evaluate Hunter Balance": { "main": [[{ "node": "Hunter Needs Alert?", "type": "main", "index": 0 }]] },
+    "Hunter Needs Alert?": {
+      "main": [
+        [{ "node": "Slack - Post Hunter Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Apify - Get User": { "main": [[{ "node": "Evaluate Apify Balance", "type": "main", "index": 0 }]] },
+    "Evaluate Apify Balance": { "main": [[{ "node": "Apify Needs Alert?", "type": "main", "index": 0 }]] },
+    "Apify Needs Alert?": {
+      "main": [
+        [{ "node": "Slack - Post Apify Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-5" }, { "name": "monitoring" }]
+}
