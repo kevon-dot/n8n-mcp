@@ -69,7 +69,10 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
     },
     {
       "id": "parse-queue",
@@ -190,7 +193,10 @@
           "appendAttribution": false,
           "senderName": "Kevon Baha"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 4000
     },
     {
       "id": "build-update-contacts",
@@ -228,7 +234,10 @@
         "options": {}
       },
       "continueOnFail": true,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
     },
     {
       "id": "if-mark-contacted",
