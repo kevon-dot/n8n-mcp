@@ -1,0 +1,347 @@
+{
+  "name": "Murray AI — P3.2 Daily Follow-Up Sender",
+  "nodes": [
+    {
+      "id": "sticky-p32-setup",
+      "name": "Phase 3.2 Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1860, -480],
+      "parameters": {
+        "content": "# Phase 3.2 — Daily Follow-Up Sender\n\nRuns daily at 8:00 AM PT. Two parallel branches:\n\n**Follow Up 1** (4 days after initial send, no reply, FU1 not yet sent):\n- Body: `Hey [first_name] just following up. Happy to send the deck over if that is easier. Would love 15 minutes whenever you are open. Kevon`\n- Same subject (replied in original Gmail thread)\n- Deck PDF attached\n- Mark `Follow Up 1 Sent = true`, `Follow Up 1 Date = today`\n\n**Follow Up 2** (5 days after FU1, no reply, FU2 not yet sent):\n- Body: `Hey [first_name] last one from me. Murray launches June 25. Happy to loop back after if timing is off. Kevon`\n- Same subject (replied in original Gmail thread)\n- NO deck attachment\n- Mark `Follow Up 2 Sent = true` and move to `No Response` group\n\nCap at `DAILY_FOLLOW_UP_LIMIT` (default 10) per branch. 12 min spacing.\n\n## Required env\n```\nGMAIL_SENDER=kevon@trymurmurai.app\nDECK_PDF_PATH=/files/Murray_AI_Pre-Seed_Deck.pdf\nDAILY_FOLLOW_UP_LIMIT=10\nSEND_SPACING_MINUTES=12\nFOLLOW_UP_1_WAIT_DAYS=4\nFOLLOW_UP_2_WAIT_DAYS=5\n```\n\n## Reply-detection short circuit\nWhen Phase 4 detects a reply, it sets BOTH `Follow Up 1 Sent` and `Follow Up 2 Sent` to true. This stops both branches of this workflow from sending to that lead. No additional flag needed.",
+        "height": 880,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-cron-3-2",
+      "name": "Daily 8:00 AM PT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1300, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 8 * * *" }] }
+      }
+    },
+    {
+      "id": "build-fu1-q",
+      "name": "Build FU1 Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-1040, -200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $statusCol: String!, $fu1Col: String!, $sendDateCol: String!, $statusVal: String!, $cutoffDate: String!, $limit: Int!) { boards(ids: [$boardId]) { items_page(query_params: { rules: [{ column_id: $statusCol, compare_value: [$statusVal], operator: contains_text }, { column_id: $fu1Col, compare_value: [\"false\"], operator: any_of }, { column_id: $sendDateCol, compare_value: [$cutoffDate], operator: lower_than_or_equals }], operator: and }, limit: $limit) { items { id name column_values { id text value } } } } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    statusCol: $env.MONDAY_COL_LEAD_STATUS,\n    fu1Col: $env.MONDAY_COL_LEAD_FOLLOW_UP_1_SENT,\n    sendDateCol: $env.MONDAY_COL_LEAD_SEND_DATE,\n    statusVal: 'Contacted',\n    cutoffDate: $now.minus({ days: parseInt($env.FOLLOW_UP_1_WAIT_DAYS || '4', 10) }).toFormat('yyyy-MM-dd'),\n    limit: parseInt($env.DAILY_FOLLOW_UP_LIMIT || '10', 10)\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-fu1-q",
+      "name": "Monday - Read FU1 Candidates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-780, -200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-fu1",
+      "name": "Parse FU1 Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-520, -200],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = (((($json.data || {}).boards || [])[0] || {}).items_page || {}).items || [];\nconst limit = parseInt($env.DAILY_FOLLOW_UP_LIMIT || '10', 10);\nfunction colVal(item, colId) { const c = (item.column_values || []).find(c => c.id === colId); return c ? (c.text || '') : ''; }\nconst leads = items.slice(0, limit).map(it => ({\n  leads_item_id: it.id,\n  lead_name: colVal(it, $env.MONDAY_COL_LEAD_NAME) || it.name,\n  first_name: ((colVal(it, $env.MONDAY_COL_LEAD_NAME) || it.name).split(/\\s+/)[0] || 'there'),\n  email: colVal(it, $env.MONDAY_COL_LEAD_EMAIL),\n  subject_line: colVal(it, $env.MONDAY_COL_LEAD_SUBJECT_LINE),\n  thread_id: colVal(it, $env.MONDAY_COL_LEAD_THREAD_ID)\n})).filter(l => l.email && l.thread_id);\nreturn leads.map(l => ({ json: l }));"
+      }
+    },
+    {
+      "id": "loop-fu1",
+      "name": "Loop FU1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-260, -200],
+      "parameters": { "batchSize": 1, "options": {} }
+    },
+    {
+      "id": "wait-fu1",
+      "name": "Wait FU1 Spacing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [0, -100],
+      "parameters": {
+        "amount": "={{ parseInt($env.SEND_SPACING_MINUTES || '12', 10) }}",
+        "unit": "minutes"
+      }
+    },
+    {
+      "id": "build-fu1-body",
+      "name": "Build FU1 Email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [260, -100],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "fu1a", "name": "body", "type": "string", "value": "=Hey {{ $json.first_name }} just following up. Happy to send the deck over if that is easier. Would love 15 minutes whenever you are open. Kevon" }
+          ]
+        },
+        "options": { "include": "all" }
+      }
+    },
+    {
+      "id": "read-pdf-fu1",
+      "name": "Read Deck PDF (FU1)",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [520, -100],
+      "parameters": {
+        "filePath": "={{ $env.DECK_PDF_PATH || '/files/Murray_AI_Pre-Seed_Deck.pdf' }}",
+        "dataPropertyName": "deck"
+      }
+    },
+    {
+      "id": "gmail-fu1",
+      "name": "Gmail - Send FU1",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [780, -100],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Loop FU1').item.json.email }}",
+        "subject": "={{ $('Loop FU1').item.json.subject_line }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "threadId": "={{ $('Loop FU1').item.json.thread_id }}",
+          "attachmentsUi": { "attachmentsBinary": [{ "property": "deck" }] },
+          "appendAttribution": false,
+          "senderName": "Kevon Baha"
+        }
+      }
+    },
+    {
+      "id": "build-fu1-update",
+      "name": "Build FU1 Update",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1040, -100],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $('Loop FU1').item.json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_FOLLOW_UP_1_SENT]: true,\n      [$env.MONDAY_COL_LEAD_FOLLOW_UP_1_DATE]: { date: $now.toFormat('yyyy-MM-dd') }\n    })\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-fu1-update",
+      "name": "Monday - Mark FU1 Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, -100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-fu2-q",
+      "name": "Build FU2 Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-1040, 240],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $statusCol: String!, $fu1Col: String!, $fu2Col: String!, $fu1DateCol: String!, $statusVal: String!, $cutoffDate: String!, $limit: Int!) { boards(ids: [$boardId]) { items_page(query_params: { rules: [{ column_id: $statusCol, compare_value: [$statusVal], operator: contains_text }, { column_id: $fu1Col, compare_value: [\"true\"], operator: any_of }, { column_id: $fu2Col, compare_value: [\"false\"], operator: any_of }, { column_id: $fu1DateCol, compare_value: [$cutoffDate], operator: lower_than_or_equals }], operator: and }, limit: $limit) { items { id name column_values { id text value } } } } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    statusCol: $env.MONDAY_COL_LEAD_STATUS,\n    fu1Col: $env.MONDAY_COL_LEAD_FOLLOW_UP_1_SENT,\n    fu2Col: $env.MONDAY_COL_LEAD_FOLLOW_UP_2_SENT,\n    fu1DateCol: $env.MONDAY_COL_LEAD_FOLLOW_UP_1_DATE,\n    statusVal: 'Contacted',\n    cutoffDate: $now.minus({ days: parseInt($env.FOLLOW_UP_2_WAIT_DAYS || '5', 10) }).toFormat('yyyy-MM-dd'),\n    limit: parseInt($env.DAILY_FOLLOW_UP_LIMIT || '10', 10)\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-fu2-q",
+      "name": "Monday - Read FU2 Candidates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-780, 240],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-fu2",
+      "name": "Parse FU2 Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-520, 240],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = (((($json.data || {}).boards || [])[0] || {}).items_page || {}).items || [];\nconst limit = parseInt($env.DAILY_FOLLOW_UP_LIMIT || '10', 10);\nfunction colVal(item, colId) { const c = (item.column_values || []).find(c => c.id === colId); return c ? (c.text || '') : ''; }\nconst leads = items.slice(0, limit).map(it => ({\n  leads_item_id: it.id,\n  lead_name: colVal(it, $env.MONDAY_COL_LEAD_NAME) || it.name,\n  first_name: ((colVal(it, $env.MONDAY_COL_LEAD_NAME) || it.name).split(/\\s+/)[0] || 'there'),\n  email: colVal(it, $env.MONDAY_COL_LEAD_EMAIL),\n  subject_line: colVal(it, $env.MONDAY_COL_LEAD_SUBJECT_LINE),\n  thread_id: colVal(it, $env.MONDAY_COL_LEAD_THREAD_ID)\n})).filter(l => l.email && l.thread_id);\nreturn leads.map(l => ({ json: l }));"
+      }
+    },
+    {
+      "id": "loop-fu2",
+      "name": "Loop FU2",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-260, 240],
+      "parameters": { "batchSize": 1, "options": {} }
+    },
+    {
+      "id": "wait-fu2",
+      "name": "Wait FU2 Spacing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [0, 360],
+      "parameters": {
+        "amount": "={{ parseInt($env.SEND_SPACING_MINUTES || '12', 10) }}",
+        "unit": "minutes"
+      }
+    },
+    {
+      "id": "build-fu2-body",
+      "name": "Build FU2 Email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [260, 360],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "fu2a", "name": "body", "type": "string", "value": "=Hey {{ $json.first_name }} last one from me. Murray launches June 25. Happy to loop back after if timing is off. Kevon" }
+          ]
+        },
+        "options": { "include": "all" }
+      }
+    },
+    {
+      "id": "gmail-fu2",
+      "name": "Gmail - Send FU2",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [520, 360],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Loop FU2').item.json.email }}",
+        "subject": "={{ $('Loop FU2').item.json.subject_line }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "threadId": "={{ $('Loop FU2').item.json.thread_id }}",
+          "appendAttribution": false,
+          "senderName": "Kevon Baha"
+        }
+      }
+    },
+    {
+      "id": "build-fu2-update",
+      "name": "Build FU2 Update + Move",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [780, 360],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $groupId: String!, $columnValues: JSON!) { move_item_to_group(item_id: $itemId, group_id: $groupId) { id } change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $('Loop FU2').item.json.leads_item_id,\n    groupId: $env.MONDAY_GROUP_NO_RESPONSE,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_FOLLOW_UP_2_SENT]: true,\n      [$env.MONDAY_COL_LEAD_STATUS]: { label: 'No Response' }\n    })\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-fu2-update",
+      "name": "Monday - Mark FU2 + No Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1040, 360],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Daily 8:00 AM PT": {
+      "main": [[
+        { "node": "Build FU1 Query", "type": "main", "index": 0 },
+        { "node": "Build FU2 Query", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build FU1 Query": { "main": [[{ "node": "Monday - Read FU1 Candidates", "type": "main", "index": 0 }]] },
+    "Monday - Read FU1 Candidates": { "main": [[{ "node": "Parse FU1 Candidates", "type": "main", "index": 0 }]] },
+    "Parse FU1 Candidates": { "main": [[{ "node": "Loop FU1", "type": "main", "index": 0 }]] },
+    "Loop FU1": { "main": [[], [{ "node": "Wait FU1 Spacing", "type": "main", "index": 0 }]] },
+    "Wait FU1 Spacing": { "main": [[{ "node": "Build FU1 Email", "type": "main", "index": 0 }]] },
+    "Build FU1 Email": { "main": [[{ "node": "Read Deck PDF (FU1)", "type": "main", "index": 0 }]] },
+    "Read Deck PDF (FU1)": { "main": [[{ "node": "Gmail - Send FU1", "type": "main", "index": 0 }]] },
+    "Gmail - Send FU1": { "main": [[{ "node": "Build FU1 Update", "type": "main", "index": 0 }]] },
+    "Build FU1 Update": { "main": [[{ "node": "Monday - Mark FU1 Sent", "type": "main", "index": 0 }]] },
+    "Monday - Mark FU1 Sent": { "main": [[{ "node": "Loop FU1", "type": "main", "index": 0 }]] },
+    "Build FU2 Query": { "main": [[{ "node": "Monday - Read FU2 Candidates", "type": "main", "index": 0 }]] },
+    "Monday - Read FU2 Candidates": { "main": [[{ "node": "Parse FU2 Candidates", "type": "main", "index": 0 }]] },
+    "Parse FU2 Candidates": { "main": [[{ "node": "Loop FU2", "type": "main", "index": 0 }]] },
+    "Loop FU2": { "main": [[], [{ "node": "Wait FU2 Spacing", "type": "main", "index": 0 }]] },
+    "Wait FU2 Spacing": { "main": [[{ "node": "Build FU2 Email", "type": "main", "index": 0 }]] },
+    "Build FU2 Email": { "main": [[{ "node": "Gmail - Send FU2", "type": "main", "index": 0 }]] },
+    "Gmail - Send FU2": { "main": [[{ "node": "Build FU2 Update + Move", "type": "main", "index": 0 }]] },
+    "Build FU2 Update + Move": { "main": [[{ "node": "Monday - Mark FU2 + No Response", "type": "main", "index": 0 }]] },
+    "Monday - Mark FU2 + No Response": { "main": [[{ "node": "Loop FU2", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-3" }]
+}

@@ -1,0 +1,308 @@
+{
+  "name": "Murray AI — P4.2 Slack Approval Handler",
+  "nodes": [
+    {
+      "id": "sticky-p42-setup",
+      "name": "Phase 4.2 Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1900, -480],
+      "parameters": {
+        "content": "# Phase 4.2 — Slack Approval Handler\n\nReceives Slack events for the approval channel `SLACK_APPROVAL_CHANNEL_ID` (private outreach-approvals channel only). Routes:\n\n- `:white_check_mark:` reaction by approver -> send Claude draft as Gmail reply in original thread.\n- Threaded message reply by approver -> send the message text as Gmail reply (overrides Claude draft).\n- `:x:` reaction by approver -> mark lead as `Needs Manual Handling` in Monday, post confirmation to approval channel.\n\nAll routing context (gmail thread id, lead email, claude draft) lives in **Slack message metadata** posted by Phase 4.1. We fetch the parent message via `conversations.history` to read it.\n\n## Required env\n```\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_SENDER=kevon@trymurmurai.app\n```\n\n## Slack app setup\n1. In the Slack app config -> Event Subscriptions -> enable.\n2. Request URL: paste the Production URL of the Slack Trigger below (n8n shows it after activating).\n3. Subscribe bot events: `reaction_added`, `message.groups` (private channel messages).\n4. Bot scopes (OAuth & Permissions): `chat:write`, `groups:history`, `reactions:read`.\n5. Reinstall the app to your workspace, invite the bot to `C0ASZ6R2K6E`.\n6. Activate this workflow in n8n.\n\n## Why messages go through `conversations.history`\nReaction events only carry message `ts`, channel, user, and reaction name. The original Claude draft + Gmail thread id are in the parent message's metadata. We must fetch the message to read it.\n\n## Channel discipline\n- This workflow ONLY listens to `SLACK_APPROVAL_CHANNEL_ID` (C0ASZ6R2K6E).\n- It posts confirmations back to the same approval channel.\n- It NEVER touches `SLACK_ALERT_CHANNEL_ID` (C0AR99Q4ZUP). Channel-mixing is impossible by design.",
+        "height": 1080,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-slack",
+      "name": "Slack Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [-1340, 0],
+      "parameters": {
+        "trigger": ["reaction_added", "any_event"],
+        "options": {}
+      }
+    },
+    {
+      "id": "filter-event",
+      "name": "Route Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1080, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const ev = $json.event || $json;\nconst approvalChannel = $env.SLACK_APPROVAL_CHANNEL_ID;\nconst approver = $env.SLACK_APPROVER_USER_ID;\nconst type = ev.type || $json.type || '';\nconst user = ev.user || $json.user || '';\nconst channel = ev.channel || ev.item?.channel || $json.channel || '';\n\nif (channel !== approvalChannel) return [];\nif (user !== approver) return [];\n\nif (type === 'reaction_added') {\n  const reaction = ev.reaction || $json.reaction || '';\n  const targetTs = (ev.item || {}).ts || $json.item?.ts;\n  if (!targetTs) return [];\n  if (reaction === 'white_check_mark' || reaction === '+1' || reaction === 'heavy_check_mark') {\n    return [{ json: { route: 'send_draft_as_is', target_ts: targetTs, channel } }];\n  }\n  if (reaction === 'x' || reaction === 'no_entry_sign') {\n    return [{ json: { route: 'mark_manual', target_ts: targetTs, channel } }];\n  }\n  return [];\n}\nif (type === 'message') {\n  // Edited reply must be in a thread under the approval message\n  const threadTs = ev.thread_ts || $json.thread_ts;\n  const subtype = ev.subtype || $json.subtype || '';\n  if (subtype) return []; // ignore bot_message, message_changed, etc.\n  if (!threadTs) return []; // top-level messages, ignore\n  const text = ev.text || $json.text || '';\n  if (!text.trim()) return [];\n  return [{ json: { route: 'send_edited', target_ts: threadTs, channel, edited_text: text } }];\n}\nreturn [];"
+      }
+    },
+    {
+      "id": "build-history-q",
+      "name": "Build History Lookup",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-820, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "h1", "name": "channel", "type": "string", "value": "={{ $json.channel }}" },
+            { "id": "h2", "name": "latest", "type": "string", "value": "={{ $json.target_ts }}" },
+            { "id": "h3", "name": "oldest", "type": "string", "value": "={{ $json.target_ts }}" },
+            { "id": "h4", "name": "inclusive", "type": "string", "value": "true" },
+            { "id": "h5", "name": "include_all_metadata", "type": "string", "value": "true" },
+            { "id": "h6", "name": "limit", "type": "string", "value": "1" },
+            { "id": "h7", "name": "_route", "type": "string", "value": "={{ $json.route }}" },
+            { "id": "h8", "name": "_edited_text", "type": "string", "value": "={{ $json.edited_text || '' }}" }
+          ]
+        },
+        "options": { "include": "none" }
+      }
+    },
+    {
+      "id": "http-history",
+      "name": "Slack - Fetch Parent Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://slack.com/api/conversations.history",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "channel", "value": "={{ $json.channel }}" },
+            { "name": "latest", "value": "={{ $json.latest }}" },
+            { "name": "oldest", "value": "={{ $json.oldest }}" },
+            { "name": "inclusive", "value": "={{ $json.inclusive }}" },
+            { "name": "include_all_metadata", "value": "={{ $json.include_all_metadata }}" },
+            { "name": "limit", "value": "={{ $json.limit }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "extract-metadata",
+      "name": "Extract Metadata + Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const msgs = $json.messages || [];\nconst lookup = $('Build History Lookup').item.json;\nif (!msgs.length) return [];\nconst msg = msgs[0];\nconst meta = msg.metadata || {};\nif (meta.event_type !== 'outreach_approval') return [];\nconst payload = meta.event_payload || {};\nreturn [{ json: {\n  route: lookup._route,\n  edited_text: lookup._edited_text || '',\n  gmail_thread_id: payload.gmail_thread_id,\n  gmail_message_id: payload.gmail_message_id,\n  lead_email: payload.lead_email,\n  sender_email: payload.sender_email,\n  sender_name: payload.sender_name,\n  leads_item_id: payload.leads_item_id,\n  subject: payload.subject,\n  claude_draft: payload.claude_draft,\n  channel: lookup.channel,\n  approval_ts: lookup.latest\n}}];"
+      }
+    },
+    {
+      "id": "switch-route",
+      "name": "Switch Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [-40, 0],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "send_draft_as_is", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "draft_as_is"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "send_edited", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "edited"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "mark_manual", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "manual"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build-final-body",
+      "name": "Build Final Body (As Is or Edited)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, -160],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "f1", "name": "final_body", "type": "string", "value": "={{ $json.route === 'send_edited' ? $json.edited_text : $json.claude_draft }}" }
+          ]
+        },
+        "options": { "include": "all" }
+      }
+    },
+    {
+      "id": "gmail-reply",
+      "name": "Gmail - Send Reply In Thread",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [500, -160],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "={{ ($json.subject || '').toLowerCase().startsWith('re:') ? $json.subject : ('Re: ' + ($json.subject || '')) }}",
+        "emailType": "text",
+        "message": "={{ $json.final_body }}",
+        "options": {
+          "threadId": "={{ $json.gmail_thread_id }}",
+          "appendAttribution": false,
+          "senderName": "Kevon Baha"
+        }
+      }
+    },
+    {
+      "id": "build-confirm-sent",
+      "name": "Build Sent Confirmation",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [760, -160],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $json.channel,\n  thread_ts: $json.approval_ts,\n  text: $json.route === 'send_edited'\n    ? `Sent your edited version to ${$json.sender_name}.`\n    : `Sent to ${$json.sender_name}.`\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-confirm-sent",
+      "name": "Slack - Confirm Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, -160],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-mark-manual",
+      "name": "Build Mark Manual",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_STATUS]: { label: 'Needs Manual Handling' }\n    })\n  },\n  _ctx: { channel: $json.channel, approval_ts: $json.approval_ts, sender_name: $json.sender_name }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-mark-manual",
+      "name": "Monday - Mark Manual",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, variables: $json.variables }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-confirm-manual",
+      "name": "Build Manual Confirmation",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [760, 200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $('Build Mark Manual').item.json._ctx.channel,\n  thread_ts: $('Build Mark Manual').item.json._ctx.approval_ts,\n  text: `Marked as manual for ${$('Build Mark Manual').item.json._ctx.sender_name}.`\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-confirm-manual",
+      "name": "Slack - Confirm Manual",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Slack Trigger": { "main": [[{ "node": "Route Event", "type": "main", "index": 0 }]] },
+    "Route Event": { "main": [[{ "node": "Build History Lookup", "type": "main", "index": 0 }]] },
+    "Build History Lookup": { "main": [[{ "node": "Slack - Fetch Parent Message", "type": "main", "index": 0 }]] },
+    "Slack - Fetch Parent Message": { "main": [[{ "node": "Extract Metadata + Route", "type": "main", "index": 0 }]] },
+    "Extract Metadata + Route": { "main": [[{ "node": "Switch Route", "type": "main", "index": 0 }]] },
+    "Switch Route": {
+      "main": [
+        [{ "node": "Build Final Body (As Is or Edited)", "type": "main", "index": 0 }],
+        [{ "node": "Build Final Body (As Is or Edited)", "type": "main", "index": 0 }],
+        [{ "node": "Build Mark Manual", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Final Body (As Is or Edited)": { "main": [[{ "node": "Gmail - Send Reply In Thread", "type": "main", "index": 0 }]] },
+    "Gmail - Send Reply In Thread": { "main": [[{ "node": "Build Sent Confirmation", "type": "main", "index": 0 }]] },
+    "Build Sent Confirmation": { "main": [[{ "node": "Slack - Confirm Sent", "type": "main", "index": 0 }]] },
+    "Build Mark Manual": { "main": [[{ "node": "Monday - Mark Manual", "type": "main", "index": 0 }]] },
+    "Monday - Mark Manual": { "main": [[{ "node": "Build Manual Confirmation", "type": "main", "index": 0 }]] },
+    "Build Manual Confirmation": { "main": [[{ "node": "Slack - Confirm Manual", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-4" }]
+}

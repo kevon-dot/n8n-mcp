@@ -1,0 +1,250 @@
+{
+  "name": "Murray AI — P4.1 Gmail Reply Detector",
+  "nodes": [
+    {
+      "id": "sticky-p41-setup",
+      "name": "Phase 4.1 Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1700, -480],
+      "parameters": {
+        "content": "# Phase 4.1 — Gmail Reply Detector\n\nGmail Trigger polls every `GMAIL_REPLY_POLL_MINUTES` (default 15). For each new inbound message:\n\n1. Look up the message's `threadId` against the Leads Board `Thread ID` column.\n2. If a match is found and the lead's status != `Qualified`:\n   - Call P1.3 Mark as Qualified (status -> Qualified, group -> Qualified Pipe Reply, write reply snippet + date).\n   - Set Follow Up 1 + 2 Sent = true to halt all follow-up sequences for that lead.\n   - Generate a draft reply via Claude.\n   - Post a structured approval card to **`SLACK_APPROVAL_CHANNEL_ID` only** (the dedicated outreach-approvals private channel). System alerts never go here.\n3. The Slack message includes Slack `metadata` with `gmail_thread_id`, `lead_email`, `lead_name`, and `claude_draft` — Phase 4.2 reads this to route the approval/edit/reject.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_APPROVAL_CHANNEL_ID=C0ASZ6R2K6E\nSLACK_APPROVER_USER_ID=U0ARUAQ3NPN\nGMAIL_REPLY_POLL_MINUTES=15\nPHASE_1_MARK_AS_QUALIFIED_WORKFLOW_ID=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (kevon@trymurmurai.app)\n- `Monday.com API`\n\n## Slack bot scopes required\n- `chat:write` (post messages)\n- `groups:history` (read messages in private channel for metadata fetch in Phase 4.2)\n- `metadata:read` and the `metadata:write` scope is unnecessary — `chat.postMessage` accepts a `metadata` field with no extra scope\n\n## Idempotency\nGmail Trigger emits each new message exactly once (it tracks history-id internally). Combined with the `lead.status != 'Qualified'` filter, a re-emitted message will still be a no-op.",
+        "height": 1000,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-gmail-reply",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [-1140, 0],
+      "parameters": {
+        "pollTimes": {
+          "item": [{ "mode": "everyMinute" }]
+        },
+        "simple": false,
+        "filters": {
+          "q": "in:inbox -in:sent"
+        },
+        "options": { "downloadAttachments": false }
+      }
+    },
+    {
+      "id": "build-lookup-q",
+      "name": "Build Thread Lookup",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-880, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $threadCol: String!, $threadId: String!) { items_page_by_column_values(board_id: $boardId, columns: [{ column_id: $threadCol, column_values: [$threadId] }], limit: 1) { items { id name column_values { id text value } } } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    threadCol: $env.MONDAY_COL_LEAD_THREAD_ID,\n    threadId: $json.threadId\n  },\n  _gmail: {\n    threadId: $json.threadId,\n    messageId: $json.id,\n    from: $json.from || ((($json.payload || {}).headers || []).find(h => h.name === 'From') || {}).value || '',\n    snippet: $json.snippet || '',\n    subject: ((($json.payload || {}).headers || []).find(h => h.name === 'Subject') || {}).value || '',\n    body: $json.body || $json.snippet || ''\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-lookup",
+      "name": "Monday - Lookup by Thread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-620, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, variables: $json.variables }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "filter-eligible",
+      "name": "Filter Eligible Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-360, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = ((($json.data || {}).items_page_by_column_values) || {}).items || [];\nconst gmail = $('Build Thread Lookup').item.json._gmail;\nif (!items.length) {\n  // No matching outreach thread, drop\n  return [];\n}\nconst lead = items[0];\nfunction colVal(item, colId) { const c = (item.column_values || []).find(c => c.id === colId); return c ? (c.text || '') : ''; }\nconst status = colVal(lead, $env.MONDAY_COL_LEAD_STATUS);\nif (status === 'Qualified') {\n  // Already handled, drop\n  return [];\n}\n// Parse sender name from From header (\"Name <email@x>\" or just email)\nconst from = gmail.from || '';\nconst senderName = (from.match(/^([^<]+?)\\s*</) || [])[1] || from.split('@')[0];\nconst senderEmail = (from.match(/<([^>]+)>/) || [])[1] || from;\nreturn [{ json: {\n  leads_item_id: lead.id,\n  lead_name: colVal(lead, $env.MONDAY_COL_LEAD_NAME) || lead.name,\n  lead_email: colVal(lead, $env.MONDAY_COL_LEAD_EMAIL) || senderEmail,\n  sender_name: senderName.trim(),\n  sender_email: senderEmail.trim(),\n  thread_id: gmail.threadId,\n  message_id: gmail.messageId,\n  subject: gmail.subject,\n  reply_text: gmail.body || gmail.snippet || '',\n  reply_snippet: (gmail.body || gmail.snippet || '').substring(0, 200)\n}}];"
+      }
+    },
+    {
+      "id": "call-mark-qualified",
+      "name": "P1.3 Mark as Qualified",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [-100, -160],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_1_MARK_AS_QUALIFIED_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "email": "={{ $json.lead_email }}",
+            "reply_received_date": "={{ $now.toFormat('yyyy-MM-dd') }}",
+            "reply_snippet": "={{ $json.reply_snippet }}"
+          },
+          "schema": [
+            { "id": "email", "type": "string", "displayName": "email" },
+            { "id": "reply_received_date", "type": "string", "displayName": "reply_received_date" },
+            { "id": "reply_snippet", "type": "string", "displayName": "reply_snippet" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "build-stop-fu",
+      "name": "Build Stop Follow-Ups",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [160, -160],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_LEADS_BOARD_ID,\n    itemId: $('Filter Eligible Reply').item.json.leads_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_LEAD_FOLLOW_UP_1_SENT]: true,\n      [$env.MONDAY_COL_LEAD_FOLLOW_UP_2_SENT]: true\n    })\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-stop-fu",
+      "name": "Monday - Stop Follow-Ups",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, -160],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "claude-draft-system",
+      "name": "Claude Draft System",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-100, 160],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  system_prompt: 'You are drafting a reply on behalf of Kevon Baha, founder of Murray AI. An investor has replied to his cold outreach email. Draft a warm, direct, and conversational response. If they asked for a call, suggest two or three specific time slots this week or next week. If they asked for the deck, confirm it is attached and offer to walk them through it. If they asked about the product, tell them the iOS beta launches June 25 2026 and offer early access. If they pushed back or said not the right fit, thank them gracefully and ask if they know anyone who would be a fit. No dashes. No bullet points. Keep it under 100 words. Sign as Kevon Baha, Founder, Murray AI. Return ONLY the email body text. No subject line, no preamble, no JSON.',\n  user_message: `The investor ${$json.sender_name} replied with this message:\\n\\n${$json.reply_text}\\n\\nDraft a reply.`,\n  context: $json\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-claude-draft-req",
+      "name": "Build Claude Draft Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [160, 160],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  model: $env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',\n  max_tokens: 400,\n  system: $json.system_prompt,\n  messages: [{ role: 'user', content: $json.user_message }]\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-claude-draft",
+      "name": "Anthropic - Draft Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 160],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 60000 }
+      }
+    },
+    {
+      "id": "build-slack-post",
+      "name": "Build Slack Approval Post",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [680, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ (function(){\n  const ctx = $('Claude Draft System').item.json.context;\n  const draft = ((($json.content || [])[0] || {}).text || '').trim().replace(/[\\u2014\\u2013]/g, ' ').replace(/^\\s*[-*\\u2022]\\s+/gm, '');\n  const text = `NEW REPLY from ${ctx.sender_name} (${ctx.sender_email})\\n\\nTHEIR MESSAGE:\\n${ctx.reply_text}\\n\\nDRAFTED RESPONSE:\\n${draft}\\n\\nReact with :white_check_mark: to send as is\\nReply to this message with your edited version to send your edit instead\\nReact with :x: to skip and handle manually`;\n  return JSON.stringify({\n    channel: $env.SLACK_APPROVAL_CHANNEL_ID,\n    text,\n    metadata: {\n      event_type: 'outreach_approval',\n      event_payload: {\n        gmail_thread_id: ctx.thread_id,\n        gmail_message_id: ctx.message_id,\n        lead_email: ctx.lead_email,\n        sender_email: ctx.sender_email,\n        sender_name: ctx.sender_name,\n        leads_item_id: ctx.leads_item_id,\n        subject: ctx.subject,\n        claude_draft: draft\n      }\n    }\n  });\n})() }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-slack-post",
+      "name": "Slack - Post Approval Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [940, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [[{ "node": "Build Thread Lookup", "type": "main", "index": 0 }]] },
+    "Build Thread Lookup": { "main": [[{ "node": "Monday - Lookup by Thread", "type": "main", "index": 0 }]] },
+    "Monday - Lookup by Thread": { "main": [[{ "node": "Filter Eligible Reply", "type": "main", "index": 0 }]] },
+    "Filter Eligible Reply": {
+      "main": [[
+        { "node": "P1.3 Mark as Qualified", "type": "main", "index": 0 },
+        { "node": "Claude Draft System", "type": "main", "index": 0 }
+      ]]
+    },
+    "P1.3 Mark as Qualified": { "main": [[{ "node": "Build Stop Follow-Ups", "type": "main", "index": 0 }]] },
+    "Build Stop Follow-Ups": { "main": [[{ "node": "Monday - Stop Follow-Ups", "type": "main", "index": 0 }]] },
+    "Claude Draft System": { "main": [[{ "node": "Build Claude Draft Request", "type": "main", "index": 0 }]] },
+    "Build Claude Draft Request": { "main": [[{ "node": "Anthropic - Draft Reply", "type": "main", "index": 0 }]] },
+    "Anthropic - Draft Reply": { "main": [[{ "node": "Build Slack Approval Post", "type": "main", "index": 0 }]] },
+    "Build Slack Approval Post": { "main": [[{ "node": "Slack - Post Approval Card", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-4" }]
+}

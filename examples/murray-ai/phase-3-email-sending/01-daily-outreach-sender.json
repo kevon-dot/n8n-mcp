@@ -1,0 +1,299 @@
+{
+  "name": "Murray AI — P3.1 Daily Outreach Sender",
+  "nodes": [
+    {
+      "id": "sticky-p3-setup",
+      "name": "Phase 3.1 Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1640, -480],
+      "parameters": {
+        "content": "# Phase 3.1 — Daily Outreach Sender\n\nRuns daily at 8:00 AM PT. Reads up to `DAILY_SEND_LIMIT` (default 15) High-confidence leads from Contacts Board (status = `Queued for Outreach`), generates a personalized cold email via Claude, sends via Gmail with the Murray AI deck attached, captures the Gmail `threadId`, and pushes the lead into Leads Board (group `New Pipeline`) via P1.2.\n\nSends are spaced `SEND_SPACING_MINUTES` apart (default 12) so all 15 finish by ~11 AM PT.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nGMAIL_SENDER=kevon@trymurmurai.app\nDECK_PDF_PATH=/files/Murray_AI_Pre-Seed_Deck.pdf\nDAILY_SEND_LIMIT=15\nSEND_SPACING_MINUTES=12\nPHASE_1_MOVE_TO_LEADS_WORKFLOW_ID=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (sender = kevon@trymurmurai.app)\n- `Monday.com API`\n- Anthropic via API key in env (no n8n credential needed for the HTTP node)\n\n## Pre-flight\n1. Place the deck PDF at the path in `DECK_PDF_PATH` inside the n8n container. If using docker-compose, mount a host folder to `/files`.\n2. Confirm SPF/DKIM/DMARC on `trymurmurai.app` are passing — cold sending without auth = spam.\n3. Smoke test: set `DAILY_SEND_LIMIT=1` and verify one email lands cleanly before flipping to 15.\n\n## System prompt\nThe Claude system prompt lives in the **\"Claude System Prompt\"** Set node — edit there in n8n UI to iterate on the Murray AI positioning without redeploying.",
+        "height": 1100,
+        "width": 460
+      }
+    },
+    {
+      "id": "sticky-p3-flow",
+      "name": "Per-lead Loop",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2680, -480],
+      "parameters": {
+        "content": "## Per-lead loop\n\n`SplitInBatches` walks the queue one lead at a time. The `Wait` node enforces the `SEND_SPACING_MINUTES` gap between sends so Gmail doesn't flag burst behavior.\n\nFor each lead:\n1. Build Claude messages payload (system + user).\n2. POST to Anthropic; expect a JSON object with `subject_line` and `email_body`.\n3. Read the deck PDF as binary.\n4. Gmail Send with subject + body + PDF attachment. Capture `threadId` from the response.\n5. Update Contacts Board: status -> `Contacted`.\n6. Call P1.2 Move to Leads Board with `thread_id` populated.\n7. Loop back into SplitInBatches.\n\n## Failure handling\n- If Claude returns malformed JSON, the lead is skipped and logged (Code node throws caught error).\n- If Gmail send fails, the Contacts item stays Queued — it will retry next day.\n- `continueOnFail` is on for the per-lead branch so one bad lead doesn't kill the run.\n\n## How to test\n- Disable Cron, add Manual Trigger.\n- Set `DAILY_SEND_LIMIT=1`.\n- Pick one test lead in Contacts (status = Queued for Outreach, confidence = High).\n- Click Execute. Watch the email land, the Contacts row flip to Contacted, and a new row appear in Leads Board / New Pipeline with `thread_id` filled.",
+        "height": 920,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-cron-3-1",
+      "name": "Daily 8:00 AM PT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1080, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 8 * * *" }] }
+      }
+    },
+    {
+      "id": "build-queue-q",
+      "name": "Build Read Queue Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-820, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $statusCol: String!, $confCol: String!, $statusVal: String!, $confVal: String!, $limit: Int!) { boards(ids: [$boardId]) { items_page(query_params: { rules: [{ column_id: $statusCol, compare_value: [$statusVal], operator: contains_text }, { column_id: $confCol, compare_value: [$confVal], operator: contains_text }], operator: and }, limit: $limit) { items { id name column_values { id text value } } } } }',\n  variables: {\n    boardId: $env.MONDAY_CONTACTS_BOARD_ID,\n    statusCol: $env.MONDAY_COL_CONTACT_STATUS,\n    confCol: $env.MONDAY_COL_CONTACT_EMAIL_CONFIDENCE,\n    statusVal: 'Queued for Outreach',\n    confVal: 'High',\n    limit: parseInt($env.DAILY_SEND_LIMIT || '15', 10)\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-read-queue",
+      "name": "Monday - Read Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-queue",
+      "name": "Parse Queue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = (((($json.data || {}).boards || [])[0] || {}).items_page || {}).items || [];\nconst limit = parseInt($env.DAILY_SEND_LIMIT || '15', 10);\n\nfunction colVal(item, colId) {\n  const c = (item.column_values || []).find(c => c.id === colId);\n  return c ? (c.text || '') : '';\n}\n\nconst leads = items.slice(0, limit).map(it => ({\n  contacts_item_id: it.id,\n  lead_name: colVal(it, $env.MONDAY_COL_CONTACT_NAME) || it.name,\n  email: colVal(it, $env.MONDAY_COL_CONTACT_EMAIL),\n  email_confidence: colVal(it, $env.MONDAY_COL_CONTACT_EMAIL_CONFIDENCE),\n  company: colVal(it, $env.MONDAY_COL_CONTACT_COMPANY),\n  source: colVal(it, $env.MONDAY_COL_CONTACT_SOURCE)\n})).filter(l => l.email && l.lead_name);\n\nreturn leads.map(l => ({ json: l }));"
+      }
+    },
+    {
+      "id": "loop-leads-3",
+      "name": "Loop Over Leads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-40, 0],
+      "parameters": { "batchSize": 1, "options": {} }
+    },
+    {
+      "id": "wait-spacing",
+      "name": "Wait Spacing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [220, 200],
+      "parameters": {
+        "amount": "={{ parseInt($env.SEND_SPACING_MINUTES || '12', 10) }}",
+        "unit": "minutes"
+      }
+    },
+    {
+      "id": "claude-system",
+      "name": "Claude System Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  system_prompt: 'You are writing cold outreach emails for Kevon Baha, founder of Murray AI. Murray AI is an iOS-first voice agent. The user invokes Murray with their voice on a locked iPhone. Murray synthesizes their Google Calendar, Gmail threads, OpenTable and Resy reservations, commute from Maps, weather, Uber availability, and spending context from Plaid in real time, then prefills the native app action and waits for one tap to confirm. Nothing executes without the user. This is not a chatbot. This is not an autonomous agent acting behind the user back. Murray is the layer between knowing and doing. iOS Public Beta launches June 25 2026. Hardware prototype delivers July 15 2026. Pre-seed round is open. SAFE, MFN, $10M cap, $25K minimum. Provisional patent filed. Write emails that are conversational, direct, and specific to the recipient. No dashes anywhere as bullet points or sentence connectors. No bullet points. No generic AI language. No excessive flattery. Lead with what Murray does for their daily life or how it connects to something they specifically have built or invested in. Keep subject lines under 12 words and specific to this person. Keep body under 150 words. End with a simple ask for 15 minutes. Sign as Kevon Baha, Founder, Murray AI. Return ONLY a JSON object with two keys: subject_line and email_body. No prose around the JSON.',\n  user_message: `Write a cold outreach email to ${$json.lead_name} who works at ${$json.company || 'an angel investor fund'}. Source: ${$json.source}. Generate a subject line and email body.`,\n  contacts_item_id: $json.contacts_item_id,\n  lead_name: $json.lead_name,\n  email: $json.email,\n  company: $json.company,\n  source: $json.source\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-claude-req",
+      "name": "Build Claude Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [740, 200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  model: $env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',\n  max_tokens: 800,\n  system: $json.system_prompt,\n  messages: [{ role: 'user', content: $json.user_message }]\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-claude",
+      "name": "Anthropic - Generate Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 60000 }
+      }
+    },
+    {
+      "id": "parse-claude",
+      "name": "Parse Claude Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1260, 200],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const text = (($json.content || [])[0] || {}).text || '';\nlet parsed = null;\ntry {\n  // Strip code fences if Claude wrapped JSON in ```json ... ```\n  const cleaned = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  // fallback: try to extract subject/body via simple regex\n  const subjectMatch = text.match(/\\\"subject_line\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"/);\n  const bodyMatch = text.match(/\\\"email_body\\\"\\s*:\\s*\\\"([\\s\\S]+?)\\\"\\s*[},]/);\n  if (subjectMatch && bodyMatch) {\n    parsed = { subject_line: subjectMatch[1], email_body: bodyMatch[1].replace(/\\\\n/g, '\\n').replace(/\\\\\\\"/g, '\\\"') };\n  }\n}\nif (!parsed || !parsed.subject_line || !parsed.email_body) {\n  throw new Error('Claude returned malformed output: ' + text.slice(0, 200));\n}\n// Sanitize: enforce no-dashes, no-bullets policy\nconst clean = (s) => String(s).replace(/[\\u2014\\u2013]/g, ' ').replace(/^\\s*[-*\\u2022]\\s+/gm, '');\nconst lead = $('Claude System Prompt').item.json;\nreturn [{ json: {\n  contacts_item_id: lead.contacts_item_id,\n  lead_name: lead.lead_name,\n  email: lead.email,\n  company: lead.company,\n  source: lead.source,\n  subject_line: clean(parsed.subject_line),\n  email_body: clean(parsed.email_body)\n}}];"
+      }
+    },
+    {
+      "id": "read-pdf",
+      "name": "Read Deck PDF",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [1520, 200],
+      "parameters": {
+        "filePath": "={{ $env.DECK_PDF_PATH || '/files/Murray_AI_Pre-Seed_Deck.pdf' }}",
+        "dataPropertyName": "deck"
+      }
+    },
+    {
+      "id": "gmail-send",
+      "name": "Gmail - Send Outreach",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1780, 200],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Parse Claude Output').item.json.email }}",
+        "subject": "={{ $('Parse Claude Output').item.json.subject_line }}",
+        "emailType": "text",
+        "message": "={{ $('Parse Claude Output').item.json.email_body }}",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [{ "property": "deck" }]
+          },
+          "appendAttribution": false,
+          "senderName": "Kevon Baha"
+        }
+      }
+    },
+    {
+      "id": "build-update-contacts",
+      "name": "Build Update Contacts",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [2040, 60],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) { change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues, create_labels_if_missing: true) { id } }',\n  variables: {\n    boardId: $env.MONDAY_CONTACTS_BOARD_ID,\n    itemId: $('Parse Claude Output').item.json.contacts_item_id,\n    columnValues: JSON.stringify({\n      [$env.MONDAY_COL_CONTACT_STATUS]: { label: 'Contacted' }\n    })\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-update-contacts",
+      "name": "Monday - Mark Contacted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2300, 60],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-move-to-leads",
+      "name": "P1.2 Move to Leads Board",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [2300, 360],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_1_MOVE_TO_LEADS_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "lead_name": "={{ $('Parse Claude Output').item.json.lead_name }}",
+            "email": "={{ $('Parse Claude Output').item.json.email }}",
+            "send_date": "={{ $now.toFormat('yyyy-MM-dd') }}",
+            "subject_line": "={{ $('Parse Claude Output').item.json.subject_line }}",
+            "email_body_snippet": "={{ $('Parse Claude Output').item.json.email_body.substring(0, 200) }}",
+            "thread_id": "={{ $('Gmail - Send Outreach').item.json.threadId }}"
+          },
+          "schema": [
+            { "id": "lead_name", "type": "string", "displayName": "lead_name" },
+            { "id": "email", "type": "string", "displayName": "email" },
+            { "id": "send_date", "type": "string", "displayName": "send_date" },
+            { "id": "subject_line", "type": "string", "displayName": "subject_line" },
+            { "id": "email_body_snippet", "type": "string", "displayName": "email_body_snippet" },
+            { "id": "thread_id", "type": "string", "displayName": "thread_id" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Daily 8:00 AM PT": { "main": [[{ "node": "Build Read Queue Query", "type": "main", "index": 0 }]] },
+    "Build Read Queue Query": { "main": [[{ "node": "Monday - Read Queue", "type": "main", "index": 0 }]] },
+    "Monday - Read Queue": { "main": [[{ "node": "Parse Queue", "type": "main", "index": 0 }]] },
+    "Parse Queue": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] },
+    "Loop Over Leads": {
+      "main": [
+        [],
+        [{ "node": "Wait Spacing", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait Spacing": { "main": [[{ "node": "Claude System Prompt", "type": "main", "index": 0 }]] },
+    "Claude System Prompt": { "main": [[{ "node": "Build Claude Request", "type": "main", "index": 0 }]] },
+    "Build Claude Request": { "main": [[{ "node": "Anthropic - Generate Email", "type": "main", "index": 0 }]] },
+    "Anthropic - Generate Email": { "main": [[{ "node": "Parse Claude Output", "type": "main", "index": 0 }]] },
+    "Parse Claude Output": { "main": [[{ "node": "Read Deck PDF", "type": "main", "index": 0 }]] },
+    "Read Deck PDF": { "main": [[{ "node": "Gmail - Send Outreach", "type": "main", "index": 0 }]] },
+    "Gmail - Send Outreach": {
+      "main": [[
+        { "node": "Build Update Contacts", "type": "main", "index": 0 },
+        { "node": "P1.2 Move to Leads Board", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build Update Contacts": { "main": [[{ "node": "Monday - Mark Contacted", "type": "main", "index": 0 }]] },
+    "Monday - Mark Contacted": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-3" }]
+}
