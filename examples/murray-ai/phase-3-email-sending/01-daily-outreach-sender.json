@@ -226,6 +226,29 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {}
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "if-mark-contacted",
+      "name": "Mark Contacted Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2560, 60],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data && $json.data.change_multiple_column_values && $json.data.change_multiple_column_values.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "exists", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
       }
     },
     {
@@ -233,7 +256,7 @@
       "name": "P1.2 Move to Leads Board",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [2300, 360],
+      "position": [2820, -60],
       "parameters": {
         "source": "database",
         "workflowId": {
@@ -263,6 +286,99 @@
       },
       "continueOnFail": true,
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "if-move-to-leads",
+      "name": "P1.2 Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3080, -60],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build-alert-mark-contacted",
+      "name": "Build Alert — Mark Contacted Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [2820, 200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `:rotating_light: P3.1 critical: Monday Mark Contacted FAILED for ${$('Parse Claude Output').item.json.lead_name} (${$('Parse Claude Output').item.json.email}).\\n\\nThe outreach email was already sent successfully via Gmail. The Contacts row is still 'Queued for Outreach' which means tomorrow's run will send a duplicate.\\n\\nAction needed: manually flip Contacts item ${$('Parse Claude Output').item.json.contacts_item_id} to 'Contacted' in Monday. Then verify a Leads Board row was created (P1.2 was skipped because of this failure).\\n\\nGmail thread id: ${$('Gmail - Send Outreach').item.json.threadId || 'unknown'}\\nSubject: ${$('Parse Claude Output').item.json.subject_line}\\nMonday error: ${JSON.stringify((($('Monday - Mark Contacted').item.json || {}).errors) || $('Monday - Mark Contacted').item.json || {}).slice(0, 500)}`\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "slack-alert-mark-contacted",
+      "name": "Slack Alert — Mark Contacted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3080, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "build-alert-move-to-leads",
+      "name": "Build Alert — P1.2 Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [3340, -200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `:rotating_light: P3.1 critical: P1.2 Move to Leads FAILED for ${$('Parse Claude Output').item.json.lead_name} (${$('Parse Claude Output').item.json.email}).\\n\\nThe outreach email was sent successfully and the Contacts row is marked Contacted, but the Leads Board row was not created. Phase 4 will not detect replies for this thread.\\n\\nAction needed: manually create a Leads Board row in 'New Pipeline' with the data below.\\n\\nGmail thread id: ${$('Gmail - Send Outreach').item.json.threadId || 'unknown'}\\nSubject: ${$('Parse Claude Output').item.json.subject_line}\\nP1.2 error: ${(($('P1.2 Move to Leads Board').item.json || {}).error) || JSON.stringify($('P1.2 Move to Leads Board').item.json || {}).slice(0, 500)}`\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "slack-alert-move-to-leads",
+      "name": "Slack Alert — P1.2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3600, -200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -282,14 +398,26 @@
     "Anthropic - Generate Email": { "main": [[{ "node": "Parse Claude Output", "type": "main", "index": 0 }]] },
     "Parse Claude Output": { "main": [[{ "node": "Read Deck PDF", "type": "main", "index": 0 }]] },
     "Read Deck PDF": { "main": [[{ "node": "Gmail - Send Outreach", "type": "main", "index": 0 }]] },
-    "Gmail - Send Outreach": {
-      "main": [[
-        { "node": "Build Update Contacts", "type": "main", "index": 0 },
-        { "node": "P1.2 Move to Leads Board", "type": "main", "index": 0 }
-      ]]
-    },
+    "Gmail - Send Outreach": { "main": [[{ "node": "Build Update Contacts", "type": "main", "index": 0 }]] },
     "Build Update Contacts": { "main": [[{ "node": "Monday - Mark Contacted", "type": "main", "index": 0 }]] },
-    "Monday - Mark Contacted": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] }
+    "Monday - Mark Contacted": { "main": [[{ "node": "Mark Contacted Succeeded?", "type": "main", "index": 0 }]] },
+    "Mark Contacted Succeeded?": {
+      "main": [
+        [{ "node": "P1.2 Move to Leads Board", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Mark Contacted Failed", "type": "main", "index": 0 }]
+      ]
+    },
+    "P1.2 Move to Leads Board": { "main": [[{ "node": "P1.2 Succeeded?", "type": "main", "index": 0 }]] },
+    "P1.2 Succeeded?": {
+      "main": [
+        [{ "node": "Loop Over Leads", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — P1.2 Failed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Alert — Mark Contacted Failed": { "main": [[{ "node": "Slack Alert — Mark Contacted", "type": "main", "index": 0 }]] },
+    "Slack Alert — Mark Contacted": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] },
+    "Build Alert — P1.2 Failed": { "main": [[{ "node": "Slack Alert — P1.2", "type": "main", "index": 0 }]] },
+    "Slack Alert — P1.2": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] }
   },
   "active": false,
   "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
