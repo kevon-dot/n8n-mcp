@@ -1,0 +1,478 @@
+{
+  "name": "Murray AI — P2.1 Daily Lead Sourcing",
+  "nodes": [
+    {
+      "id": "sticky-p2-setup",
+      "name": "Phase 2 Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1620, -460],
+      "parameters": {
+        "content": "# Phase 2 — Daily Lead Sourcing\n\nDaily 6:00 AM PT cron. Pulls angel investor leads from Apify Crunchbase + Apify Wellfound actors, dedupes against Monday boards via P1.4, enriches emails via Hunter.io, and adds **High-confidence-only** leads to the Contacts Board via P1.1. Posts a Slack alert if the Queued for Outreach queue exceeds the threshold.\n\n## Required env (add to docker-compose.yml)\n\n```\n# Apify\nAPIFY_TOKEN=apify_api_xxx\nAPIFY_CRUNCHBASE_ACTOR_ID=username~actor-name\nAPIFY_WELLFOUND_ACTOR_ID=username~actor-name\n\n# Hunter.io  (Hunter scores are 0-100, so 90 == 0.9)\nHUNTER_API_KEY=xxx\nHUNTER_MIN_CONFIDENCE=90\n\n# Slack alerts\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_ALERT_CHANNEL_ID=C0AR99Q4ZUP\n\n# Tunables\nPHASE_2_QUEUE_PAUSE_THRESHOLD=30\nPHASE_2_LEAD_FETCH_LIMIT=50\n\n# Phase 1 sub-workflow ids (after import, copy from each workflow URL)\nPHASE_1_CHECK_DUPLICATE_WORKFLOW_ID=...\nPHASE_1_ADD_TO_CONTACTS_WORKFLOW_ID=...\n```\n\n## Required credential\n- `Monday.com API` credential attached to the queue-count HTTP node (same one used in Phase 1).\n\n## Note on Apify input shape\nDifferent Apify Crunchbase / Wellfound actors expect different input schemas. The two `Build * Input` nodes contain the user's spec'd filters in a generic shape — adjust them once to match your chosen actor's input schema (the actor's README on Apify shows the expected JSON shape).\n\n## Email-confidence policy\nOnly leads with Hunter.io score >= `HUNTER_MIN_CONFIDENCE` (default 90 == 0.9 confidence) are written to the Contacts Board. Lower-confidence leads are dropped silently and counted in the run summary. This protects sender domain reputation.",
+        "height": 1180,
+        "width": 480
+      }
+    },
+    {
+      "id": "sticky-p2-flow",
+      "name": "Flow Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2300, -460],
+      "parameters": {
+        "content": "## Per-lead pipeline (right side)\n\n1. **P1.4 Check Duplicate** is called via Execute Workflow with `{email, lead_name, company}`. Skip if `is_duplicate=true`.\n2. **Hunter.io email finder** — GET `email-finder` with `domain` + `first_name` + `last_name`. Skip if score < `HUNTER_MIN_CONFIDENCE`.\n3. **P1.1 Add to Contacts Board** is called with `email_confidence='High'` always (Medium leads are filtered out).\n\n## End-of-run\n4. **Count Queued for Outreach** queries Contacts Board for items in `Queued for Outreach` status.\n5. If count > `PHASE_2_QUEUE_PAUSE_THRESHOLD` (default 30), posts Slack alert to `SLACK_ALERT_CHANNEL_ID`.\n\n## Failure handling\n- Apify nodes have `continueOnFail` on — if one source dies, the other still runs.\n- Hunter.io 404 (no email found) is treated as score=0 and the lead is dropped silently.\n- The whole batch never aborts a single workflow run; failures are logged in the run summary.\n\n## How to test this workflow\n1. Disable the Cron trigger.\n2. Add a Manual Trigger node alongside the Cron, connect it to the same downstream node.\n3. Lower `PHASE_2_LEAD_FETCH_LIMIT=3` for the first run.\n4. Click Execute Workflow. Watch the per-node output.\n5. When happy, remove Manual Trigger and re-enable the Cron.",
+        "height": 920,
+        "width": 460
+      }
+    },
+    {
+      "id": "trigger-cron",
+      "name": "Daily 6:00 AM PT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1080, 0],
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 6 * * *" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "build-cb-input",
+      "name": "Build Crunchbase Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-820, -180],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  investor_types: ['individual_investor', 'angel', 'micro_vc'],\n  funding_stage: ['pre_seed', 'seed'],\n  check_size_min: 0,\n  check_size_max: 25000,\n  categories: ['consumer_ai', 'artificial_intelligence', 'voice_technology', 'ambient_intelligence', 'mobile', 'ios'],\n  location: 'united_states',\n  last_investment_date_min_months_ago: 12,\n  sort_by: 'last_investment_date',\n  sort_direction: 'desc',\n  limit: parseInt($env.PHASE_2_LEAD_FETCH_LIMIT || '50', 10)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-cb",
+      "name": "Apify - Crunchbase Actor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, -180],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/{{ $env.APIFY_CRUNCHBASE_ACTOR_ID }}/run-sync-get-dataset-items?token={{ $env.APIFY_TOKEN }}&timeout=300",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 320000
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "norm-cb",
+      "name": "Normalize Crunchbase",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, -180],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Apify run-sync-get-dataset-items returns an ARRAY of items.\n// Each Apify Crunchbase actor has a different schema; this code handles the common shape:\n// { name, full_name, person_name, organization, primary_organization, primary_organization_name,\n//   website, domain, categories, last_investment_date, ... }\n// Adjust field names below if your actor returns different keys.\n\nconst items = Array.isArray($input.first().json) ? $input.first().json : ($input.first().json.items || []);\n\nfunction pickName(it) {\n  return it.full_name || it.person_name || it.name || `${it.first_name || ''} ${it.last_name || ''}`.trim() || null;\n}\nfunction pickCompany(it) {\n  return it.primary_organization_name || it.primary_organization || it.organization || it.company || null;\n}\nfunction pickDomain(it) {\n  const url = it.website || it.domain || it.organization_website || it.primary_organization_website || '';\n  if (!url) return null;\n  try { return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\\./, ''); }\n  catch { return url.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0]; }\n}\nfunction splitName(full) {\n  if (!full) return { first: '', last: '' };\n  const parts = full.trim().split(/\\s+/);\n  return { first: parts[0] || '', last: parts.slice(1).join(' ') || '' };\n}\n\nreturn items.map(it => {\n  const full = pickName(it);\n  const { first, last } = splitName(full);\n  return {\n    json: {\n      source: 'Crunchbase',\n      full_name: full,\n      first_name: first,\n      last_name: last,\n      company: pickCompany(it),\n      domain: pickDomain(it),\n      categories: it.categories || it.investor_categories || [],\n      raw: it\n    }\n  };\n}).filter(r => r.json.full_name && r.json.domain);"
+      }
+    },
+    {
+      "id": "build-wf-input",
+      "name": "Build Wellfound Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-820, 180],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  investor_type: 'angel_investor',\n  stage: 'pre-seed',\n  check_size_min: 0,\n  check_size_max: 25000,\n  topics: ['AI', 'voice', 'consumer_tech', 'iOS', 'ambient_computing'],\n  location: 'united_states',\n  active_last_months: 12,\n  limit: parseInt($env.PHASE_2_LEAD_FETCH_LIMIT || '50', 10)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-wf",
+      "name": "Apify - Wellfound Actor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 180],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/{{ $env.APIFY_WELLFOUND_ACTOR_ID }}/run-sync-get-dataset-items?token={{ $env.APIFY_TOKEN }}&timeout=300",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 320000
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "norm-wf",
+      "name": "Normalize Wellfound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 180],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Wellfound actors typically return: { name, full_name, headline, company, website, domain, topics, ... }\nconst items = Array.isArray($input.first().json) ? $input.first().json : ($input.first().json.items || []);\n\nfunction pickName(it) { return it.full_name || it.name || `${it.first_name || ''} ${it.last_name || ''}`.trim() || null; }\nfunction pickCompany(it) { return it.company || it.organization || it.fund || null; }\nfunction pickDomain(it) {\n  const url = it.website || it.domain || it.company_website || '';\n  if (!url) return null;\n  try { return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\\./, ''); }\n  catch { return url.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0]; }\n}\nfunction splitName(full) {\n  if (!full) return { first: '', last: '' };\n  const parts = full.trim().split(/\\s+/);\n  return { first: parts[0] || '', last: parts.slice(1).join(' ') || '' };\n}\n\nreturn items.map(it => {\n  const full = pickName(it);\n  const { first, last } = splitName(full);\n  return {\n    json: {\n      source: 'AngelList',\n      full_name: full,\n      first_name: first,\n      last_name: last,\n      company: pickCompany(it),\n      domain: pickDomain(it),\n      categories: it.topics || it.markets || [],\n      raw: it\n    }\n  };\n}).filter(r => r.json.full_name && r.json.domain);"
+      }
+    },
+    {
+      "id": "merge-sources",
+      "name": "Merge Both Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [-40, 0],
+      "parameters": {
+        "mode": "append"
+      }
+    },
+    {
+      "id": "loop-leads",
+      "name": "Loop Over Leads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [220, 0],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "call-dedup",
+      "name": "P1.4 Check Duplicate",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [480, 0],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_1_CHECK_DUPLICATE_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "email": "={{ '' }}",
+            "lead_name": "={{ $json.full_name }}",
+            "company": "={{ $json.company }}"
+          },
+          "schema": [
+            { "id": "email", "type": "string", "displayName": "email" },
+            { "id": "lead_name", "type": "string", "displayName": "lead_name" },
+            { "id": "company", "type": "string", "displayName": "company" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-not-dup",
+      "name": "Not a Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [740, 0],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-hunter",
+      "name": "Hunter.io - Email Finder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, -120],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hunter.io/v2/email-finder",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "domain", "value": "={{ $('Loop Over Leads').item.json.domain }}" },
+            { "name": "first_name", "value": "={{ $('Loop Over Leads').item.json.first_name }}" },
+            { "name": "last_name", "value": "={{ $('Loop Over Leads').item.json.last_name }}" },
+            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "if-confidence",
+      "name": "Confidence >= Threshold?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1260, -120],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.data && $json.data.email) ? 1 : 0 }}",
+              "rightValue": 1,
+              "operator": { "type": "number", "operation": "equals" }
+            },
+            {
+              "leftValue": "={{ ($json.data && $json.data.score) ? Number($json.data.score) : 0 }}",
+              "rightValue": "={{ Number($env.HUNTER_MIN_CONFIDENCE || 90) }}",
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build-add-payload",
+      "name": "Build Add to Contacts Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1520, -200],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  lead_name: $('Loop Over Leads').item.json.full_name,\n  email: $json.data.email,\n  email_confidence: 'High',\n  company: $('Loop Over Leads').item.json.company,\n  source: $('Loop Over Leads').item.json.source\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-add",
+      "name": "P1.1 Add to Contacts Board",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1780, -200],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_1_ADD_TO_CONTACTS_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "lead_name": "={{ $json.lead_name }}",
+            "email": "={{ $json.email }}",
+            "email_confidence": "={{ $json.email_confidence }}",
+            "company": "={{ $json.company }}",
+            "source": "={{ $json.source }}"
+          },
+          "schema": [
+            { "id": "lead_name", "type": "string", "displayName": "lead_name" },
+            { "id": "email", "type": "string", "displayName": "email" },
+            { "id": "email_confidence", "type": "string", "displayName": "email_confidence" },
+            { "id": "company", "type": "string", "displayName": "company" },
+            { "id": "source", "type": "string", "displayName": "source" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "build-queue-count",
+      "name": "Build Queue Count Query",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 380],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  query: 'query ($boardId: ID!, $columnId: String!, $value: String!) { items_page_by_column_values(board_id: $boardId, columns: [{ column_id: $columnId, column_values: [$value] }], limit: 500) { items { id } } }',\n  variables: {\n    boardId: $env.MONDAY_CONTACTS_BOARD_ID,\n    columnId: $env.MONDAY_COL_CONTACT_STATUS,\n    value: 'Queued for Outreach'\n  }\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "http-queue-count",
+      "name": "Monday - Count Queued",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.monday.com/v2",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mondayComApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "API-Version", "value": "2024-10" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "compute-overflow",
+      "name": "Compute Queue Overflow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 380],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = (($json.data || {}).items_page_by_column_values || {}).items || [];\nconst threshold = parseInt($env.PHASE_2_QUEUE_PAUSE_THRESHOLD || '30', 10);\nreturn [{ json: { queue_count: items.length, threshold, overflow: items.length > threshold } }];"
+      }
+    },
+    {
+      "id": "if-overflow",
+      "name": "Queue Over Threshold?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1260, 380],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.overflow }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-slack-alert",
+      "name": "Slack - Queue Overflow Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1520, 320],
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  channel: $env.SLACK_ALERT_CHANNEL_ID,\n  text: `Lead queue has exceeded ${$json.threshold}. Currently ${$json.queue_count} contacts in Queued for Outreach. Review before next batch.`\n}) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Daily 6:00 AM PT": {
+      "main": [
+        [
+          { "node": "Build Crunchbase Input", "type": "main", "index": 0 },
+          { "node": "Build Wellfound Input", "type": "main", "index": 0 },
+          { "node": "Build Queue Count Query", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Crunchbase Input": {
+      "main": [[{ "node": "Apify - Crunchbase Actor", "type": "main", "index": 0 }]]
+    },
+    "Apify - Crunchbase Actor": {
+      "main": [[{ "node": "Normalize Crunchbase", "type": "main", "index": 0 }]]
+    },
+    "Normalize Crunchbase": {
+      "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 0 }]]
+    },
+    "Build Wellfound Input": {
+      "main": [[{ "node": "Apify - Wellfound Actor", "type": "main", "index": 0 }]]
+    },
+    "Apify - Wellfound Actor": {
+      "main": [[{ "node": "Normalize Wellfound", "type": "main", "index": 0 }]]
+    },
+    "Normalize Wellfound": {
+      "main": [[{ "node": "Merge Both Sources", "type": "main", "index": 1 }]]
+    },
+    "Merge Both Sources": {
+      "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]]
+    },
+    "Loop Over Leads": {
+      "main": [
+        [],
+        [{ "node": "P1.4 Check Duplicate", "type": "main", "index": 0 }]
+      ]
+    },
+    "P1.4 Check Duplicate": {
+      "main": [[{ "node": "Not a Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Not a Duplicate?": {
+      "main": [
+        [{ "node": "Hunter.io - Email Finder", "type": "main", "index": 0 }],
+        [{ "node": "Loop Over Leads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Hunter.io - Email Finder": {
+      "main": [[{ "node": "Confidence >= Threshold?", "type": "main", "index": 0 }]]
+    },
+    "Confidence >= Threshold?": {
+      "main": [
+        [{ "node": "Build Add to Contacts Payload", "type": "main", "index": 0 }],
+        [{ "node": "Loop Over Leads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Add to Contacts Payload": {
+      "main": [[{ "node": "P1.1 Add to Contacts Board", "type": "main", "index": 0 }]]
+    },
+    "P1.1 Add to Contacts Board": {
+      "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]]
+    },
+    "Build Queue Count Query": {
+      "main": [[{ "node": "Monday - Count Queued", "type": "main", "index": 0 }]]
+    },
+    "Monday - Count Queued": {
+      "main": [[{ "node": "Compute Queue Overflow", "type": "main", "index": 0 }]]
+    },
+    "Compute Queue Overflow": {
+      "main": [[{ "node": "Queue Over Threshold?", "type": "main", "index": 0 }]]
+    },
+    "Queue Over Threshold?": {
+      "main": [
+        [{ "node": "Slack - Queue Overflow Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "timezone": "America/Los_Angeles" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "murray-ai" }, { "name": "phase-2" }]
+}
