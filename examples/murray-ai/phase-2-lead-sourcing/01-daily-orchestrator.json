@@ -112,6 +112,20 @@
       }
     },
     {
+      "id": "debug-raw-lead",
+      "name": "Debug Raw Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -300,
+        -40
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TEMPORARY -- dumps the first lead item so we can see the actor's real\n// field names. Remove this node once the Qualify Leads filter field\n// references are confirmed correct.\nconst all = $input.all();\nconsole.log(`[P2.1 debug] Crunchbase actor returned ${all.length} lead(s)`);\nif (all.length) {\n  const first = all[0].json || {};\n  console.log('[P2.1 debug] normalized shape of lead[0]:');\n  console.log(JSON.stringify({\n    source: first.source, full_name: first.full_name, first_name: first.first_name,\n    last_name: first.last_name, company: first.company, domain: first.domain,\n    categories: first.categories\n  }, null, 2));\n  console.log('[P2.1 debug] RAW actor payload for lead[0] (this is what Qualify Leads keys off):');\n  console.log(JSON.stringify(first.raw, null, 2));\n  console.log('[P2.1 debug] keys present on raw:', Object.keys(first.raw || {}).sort().join(', '));\n}\nreturn all;"
+      }
+    },
+    {
       "id": "qualify-leads",
       "name": "Qualify Leads",
       "type": "n8n-nodes-base.code",
@@ -122,7 +136,7 @@
       ],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "// Lead qualification filter applied BEFORE the dedup/enrich loop.\n// Every rejection is console.logged to the n8n execution log with the\n// lead name and exact reason. Rules are short-circuited in order so\n// each dropped lead shows the FIRST disqualifying reason, not all.\n\nconst DISALLOWED_ORGS = ['Anthropic', 'OpenAI', 'Apple', 'Google', 'Amazon'];\nconst OPERATOR_TITLES = ['CEO', 'CTO', 'Founder', 'Co-Founder', 'Co Founder'];\nconst MIN_INVESTMENTS = 3;\nconst MAX_AGE_MONTHS = 12;\n\nconst cutoffDate = new Date();\ncutoffDate.setMonth(cutoffDate.getMonth() - MAX_AGE_MONTHS);\n\nconst kept = [];\nconst stats = { dropped_investments: 0, dropped_inactive: 0, dropped_operator: 0, dropped_conflict: 0 };\n\nfor (const item of $input.all()) {\n  const lead = item.json || {};\n  const raw = lead.raw || {};\n  const name = lead.full_name || 'unknown';\n  const fundName = String(lead.company || '').trim().toLowerCase();\n\n  const totalFundingCount = Number(raw.total_funding_count ?? raw.num_investments ?? raw.num_exits ?? 0);\n  const lastFundingDateRaw = raw.last_funding_date || raw.last_investment_date || raw.last_funding_on || null;\n  const primaryJobTitle = String(raw.primary_job_title || raw.title || '');\n  const primaryOrg = String(raw.primary_organization_name || raw.primary_organization || raw.organization || '');\n\n  // Rule 1: fewer than 3 total investments\n  if (totalFundingCount < MIN_INVESTMENTS) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: fewer than 3 total investments (count=${totalFundingCount})`);\n    stats.dropped_investments++;\n    continue;\n  }\n\n  // Rule 2: last investment older than 12 months\n  if (!lastFundingDateRaw) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (no last_funding_date on record)`);\n    stats.dropped_inactive++;\n    continue;\n  }\n  const lastFundingDate = new Date(lastFundingDateRaw);\n  if (isNaN(lastFundingDate.getTime()) || lastFundingDate < cutoffDate) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (last_funding_date=${lastFundingDateRaw})`);\n    stats.dropped_inactive++;\n    continue;\n  }\n\n  // Rule 3: full-time operator (has an operator title at an org that is not their own fund)\n  const titleLower = primaryJobTitle.toLowerCase();\n  const orgLower = primaryOrg.trim().toLowerCase();\n  const isOperatorTitle = OPERATOR_TITLES.some(t => titleLower.includes(t.toLowerCase()));\n  if (isOperatorTitle && orgLower && orgLower !== fundName) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: full-time operator (${primaryJobTitle} at ${primaryOrg})`);\n    stats.dropped_operator++;\n    continue;\n  }\n\n  // Rule 4: conflict of interest (primary org is one of the BigCo AI labs)\n  const hasConflict = DISALLOWED_ORGS.some(o => orgLower.includes(o.toLowerCase()));\n  if (hasConflict) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: conflict of interest (primary_organization=${primaryOrg})`);\n    stats.dropped_conflict++;\n    continue;\n  }\n\n  kept.push(item);\n}\n\nconsole.log(`[P2.1 qualify] kept ${kept.length} | dropped_investments=${stats.dropped_investments} dropped_inactive=${stats.dropped_inactive} dropped_operator=${stats.dropped_operator} dropped_conflict=${stats.dropped_conflict}`);\nreturn kept;"
+        "jsCode": "// Lead qualification filter applied BEFORE the dedup/enrich loop.\n// Every rejection is console.logged to the n8n execution log with the\n// lead name and exact reason. Rules are short-circuited in order so\n// each dropped lead shows the FIRST disqualifying reason, not all.\n\nconst DISALLOWED_ORGS = ['Anthropic', 'OpenAI', 'Apple', 'Google', 'Amazon'];\nconst OPERATOR_TITLES = ['CEO', 'CTO', 'Founder', 'Co-Founder', 'Co Founder'];\nconst MIN_INVESTMENTS = 3;\nconst MAX_AGE_MONTHS = 12;\n\nconst cutoffDate = new Date();\ncutoffDate.setMonth(cutoffDate.getMonth() - MAX_AGE_MONTHS);\n\nconst kept = [];\nconst stats = { dropped_insufficient_investments: 0, dropped_inactive: 0, dropped_operator: 0, dropped_conflict: 0 };\n\nfor (const item of $input.all()) {\n  const lead = item.json || {};\n  const raw = lead.raw || {};\n  const name = lead.full_name || 'unknown';\n  const fundName = String(lead.company || '').trim().toLowerCase();\n\n  const totalFundingCount = Number(raw.total_funding_count ?? raw.num_investments ?? raw.num_exits ?? 0);\n  const lastFundingDateRaw = raw.last_funding_date || raw.last_investment_date || raw.last_funding_on || null;\n  const primaryJobTitle = String(raw.primary_job_title || raw.title || '');\n  const primaryOrg = String(raw.primary_organization_name || raw.primary_organization || raw.organization || '');\n\n  // Rule 1: fewer than 3 total investments\n  if (totalFundingCount < MIN_INVESTMENTS) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: fewer than 3 total investments (count=${totalFundingCount})`);\n    stats.dropped_insufficient_investments++;\n    continue;\n  }\n\n  // Rule 2: last investment older than 12 months\n  if (!lastFundingDateRaw) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (no last_funding_date on record)`);\n    stats.dropped_inactive++;\n    continue;\n  }\n  const lastFundingDate = new Date(lastFundingDateRaw);\n  if (isNaN(lastFundingDate.getTime()) || lastFundingDate < cutoffDate) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (last_funding_date=${lastFundingDateRaw})`);\n    stats.dropped_inactive++;\n    continue;\n  }\n\n  // Rule 3: full-time operator (has an operator title at an org that is not their own fund)\n  const titleLower = primaryJobTitle.toLowerCase();\n  const orgLower = primaryOrg.trim().toLowerCase();\n  const isOperatorTitle = OPERATOR_TITLES.some(t => titleLower.includes(t.toLowerCase()));\n  if (isOperatorTitle && orgLower && orgLower !== fundName) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: full-time operator (${primaryJobTitle} at ${primaryOrg})`);\n    stats.dropped_operator++;\n    continue;\n  }\n\n  // Rule 4: conflict of interest (primary org is one of the BigCo AI labs)\n  const hasConflict = DISALLOWED_ORGS.some(o => orgLower.includes(o.toLowerCase()));\n  if (hasConflict) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: conflict of interest (primary_organization=${primaryOrg})`);\n    stats.dropped_conflict++;\n    continue;\n  }\n\n  kept.push(item);\n}\n\nconsole.log(`[P2.1 qualify] kept ${kept.length} leads | dropped_inactive ${stats.dropped_inactive} | dropped_conflict ${stats.dropped_conflict} | dropped_operator ${stats.dropped_operator} | dropped_insufficient_investments ${stats.dropped_insufficient_investments}`);\nreturn kept;"
       }
     },
     {
@@ -642,7 +656,7 @@
       "main": [
         [
           {
-            "node": "Qualify Leads",
+            "node": "Debug Raw Lead",
             "type": "main",
             "index": 0
           }
@@ -820,6 +834,17 @@
         [
           {
             "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debug Raw Lead": {
+      "main": [
+        [
+          {
+            "node": "Qualify Leads",
             "type": "main",
             "index": 0
           }
