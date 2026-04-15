@@ -11,7 +11,7 @@
         -460
       ],
       "parameters": {
-        "content": "# Phase 2 — Daily Lead Sourcing\n\nDaily 6:00 AM PT cron. Pulls angel investor leads from the Apify Crunchbase actor (`curious_coder/crunchbase-scraper`), dedupes against Monday boards via P1.4, enriches emails via Hunter.io, and adds **High-confidence-only** leads to the Contacts Board via P1.1. Posts a Slack alert if the Queued for Outreach queue exceeds the threshold.\n\nWellfound has been dropped from the pipeline -- there is no reliable investor actor available. Angel sourcing from Signal NFX or other hand-curated sources lands as a separate CSV-drop workflow.\n\n## Required env (add to docker-compose.yml)\n\n```\n# Apify\nAPIFY_TOKEN=apify_api_xxx\nAPIFY_CRUNCHBASE_ACTOR_ID=curious_coder/crunchbase-scraper\n\n# Hunter.io  (accepts 0.9 OR 90 — workflow normalizes either way)\nHUNTER_API_KEY=xxx\nHUNTER_MIN_CONFIDENCE=0.9\n\n# Slack alerts\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_ALERT_CHANNEL_ID=C0AR99Q4ZUP\n\n# Tunables\nPHASE_2_QUEUE_PAUSE_THRESHOLD=30\nPHASE_2_LEAD_FETCH_LIMIT=50\n\n# Phase 1 sub-workflow ids (after import, copy from each workflow URL)\nPHASE_1_CHECK_DUPLICATE_WORKFLOW_ID=...\nPHASE_1_ADD_TO_CONTACTS_WORKFLOW_ID=...\n```\n\n## Required credential\n- `Monday.com API` credential attached to the queue-count HTTP node (same one used in Phase 1).\n\n## Note on Apify input shape\nThe `curious_coder/crunchbase-scraper` actor is URL-driven -- it expects a `startUrls` array pointing at a Crunchbase search URL with filters already applied. The current `Build Crunchbase Input` node sends the generic filter set and must be adapted once the user provides the actual Crunchbase search URL. Until that rewrite lands, the actor will not return filtered results.\n\n## Email-confidence policy\nOnly leads with Hunter.io score >= `HUNTER_MIN_CONFIDENCE` are written to the Contacts Board. Threshold accepts either `0.9` (0-1 fraction) or `90` (0-100 score) — the workflow normalizes either form. Default is 0.9. Lower-confidence leads are dropped silently. This protects sender domain reputation.",
+        "content": "# Phase 2 — Daily Lead Sourcing\n\nDaily 6:00 AM PT cron. Pulls angel investor leads from the Apify Crunchbase actor (`curious_coder/crunchbase-scraper`), dedupes against Monday boards via P1.4, enriches emails via Hunter.io, and adds **High-confidence-only** leads to the Contacts Board via P1.1. Posts a Slack alert if the Queued for Outreach queue exceeds the threshold.\n\nWellfound has been dropped from the pipeline -- there is no reliable investor actor available. Angel sourcing from Signal NFX or other hand-curated sources lands as a separate CSV-drop workflow.\n\n## Required env (add to docker-compose.yml)\n\n```\n# Apify\nAPIFY_TOKEN=apify_api_xxx\nAPIFY_CRUNCHBASE_ACTOR_ID=curious_coder/crunchbase-scraper\n\n# Hunter.io  (accepts 0.9 OR 90 — workflow normalizes either way)\nHUNTER_API_KEY=xxx\nHUNTER_MIN_CONFIDENCE=0.9\n\n# Slack alerts\nSLACK_BOT_TOKEN=xoxb-...\nSLACK_ALERT_CHANNEL_ID=C0AR99Q4ZUP\n\n# Tunables\nPHASE_2_QUEUE_PAUSE_THRESHOLD=30\nPHASE_2_LEAD_FETCH_LIMIT=50\n\n# Phase 1 sub-workflow ids (after import, copy from each workflow URL)\nPHASE_1_CHECK_DUPLICATE_WORKFLOW_ID=...\nPHASE_1_ADD_TO_CONTACTS_WORKFLOW_ID=...\n```\n\n## Required credential\n- `Monday.com API` credential attached to the queue-count HTTP node (same one used in Phase 1).\n\n## Note on Apify input shape\n`curious_coder/crunchbase-scraper` is URL-driven. `Build Crunchbase Input` emits `{ startUrls: [{ url }], maxItems, proxyConfiguration }`. The URL is the Crunchbase Advanced Search URL that already has all filters (investor type, stage, check size, categories, location, last-investment window) applied. Swap the URL in the Set node if you want different filters -- no other rewiring needed.\n\n## Qualify Leads filter\nBefore dedup, every Crunchbase result passes through a qualification step that drops:\n1. Investors with fewer than 3 total investments (`total_funding_count < 3`)\n2. Inactive investors (`last_funding_date` older than 12 months, or missing)\n3. Full-time operators (primary job title contains CEO / CTO / Founder / Co-Founder AND `primary_organization` is not their fund)\n4. Conflict-of-interest orgs (primary organization matches Anthropic / OpenAI / Apple / Google / Amazon)\n\nEvery drop is console-logged to the n8n execution log with the lead name and specific reason. Aggregate counts print at the end.\n\n## Email-confidence policy\nOnly leads with Hunter.io score >= `HUNTER_MIN_CONFIDENCE` are written to the Contacts Board. Threshold accepts either `0.9` (0-1 fraction) or `90` (0-100 score) — the workflow normalizes either form. Default is 0.9. Lower-confidence leads are dropped silently. This protects sender domain reputation.",
         "height": 1180,
         "width": 480
       }
@@ -62,7 +62,7 @@
       ],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  investor_types: ['individual_investor', 'angel', 'micro_vc'],\n  funding_stage: ['pre_seed', 'seed'],\n  check_size_min: 0,\n  check_size_max: 25000,\n  categories: ['consumer_ai', 'artificial_intelligence', 'voice_technology', 'ambient_intelligence', 'mobile', 'ios'],\n  location: 'united_states',\n  last_investment_date_min_months_ago: 12,\n  sort_by: 'last_investment_date',\n  sort_direction: 'desc',\n  limit: parseInt($env.PHASE_2_LEAD_FETCH_LIMIT || '50', 10)\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  startUrls: [{ url: 'https://www.crunchbase.com/discover/principal.investors/6d45d82e0ccb840db702bbfae4302d01' }],\n  maxItems: parseInt($env.PHASE_2_LEAD_FETCH_LIMIT || '50', 10),\n  proxyConfiguration: { useApifyProxy: true }\n}) }}",
         "options": {}
       }
     },
@@ -109,6 +109,20 @@
       "parameters": {
         "language": "javaScript",
         "jsCode": "// Apify run-sync-get-dataset-items returns an ARRAY of items.\n// Each Apify Crunchbase actor has a different schema; this code handles the common shape:\n// { name, full_name, person_name, organization, primary_organization, primary_organization_name,\n//   website, domain, categories, last_investment_date, ... }\n// Adjust field names below if your actor returns different keys.\n\nconst items = Array.isArray($input.first().json) ? $input.first().json : ($input.first().json.items || []);\n\nfunction pickName(it) {\n  return it.full_name || it.person_name || it.name || `${it.first_name || ''} ${it.last_name || ''}`.trim() || null;\n}\nfunction pickCompany(it) {\n  return it.primary_organization_name || it.primary_organization || it.organization || it.company || null;\n}\nfunction pickDomain(it) {\n  const url = it.website || it.domain || it.organization_website || it.primary_organization_website || '';\n  if (!url) return null;\n  try { return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\\./, ''); }\n  catch { return url.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0]; }\n}\nfunction splitName(full) {\n  if (!full) return { first: '', last: '' };\n  const parts = full.trim().split(/\\s+/);\n  return { first: parts[0] || '', last: parts.slice(1).join(' ') || '' };\n}\n\nreturn items.map(it => {\n  const full = pickName(it);\n  const { first, last } = splitName(full);\n  return {\n    json: {\n      source: 'Crunchbase',\n      full_name: full,\n      first_name: first,\n      last_name: last,\n      company: pickCompany(it),\n      domain: pickDomain(it),\n      categories: it.categories || it.investor_categories || [],\n      raw: it\n    }\n  };\n}).filter(r => r.json.full_name && r.json.domain);"
+      }
+    },
+    {
+      "id": "qualify-leads",
+      "name": "Qualify Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -170,
+        -180
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Lead qualification filter applied BEFORE the dedup/enrich loop.\n// Every rejection is console.logged to the n8n execution log with the\n// lead name and exact reason. Rules are short-circuited in order so\n// each dropped lead shows the FIRST disqualifying reason, not all.\n\nconst DISALLOWED_ORGS = ['Anthropic', 'OpenAI', 'Apple', 'Google', 'Amazon'];\nconst OPERATOR_TITLES = ['CEO', 'CTO', 'Founder', 'Co-Founder', 'Co Founder'];\nconst MIN_INVESTMENTS = 3;\nconst MAX_AGE_MONTHS = 12;\n\nconst cutoffDate = new Date();\ncutoffDate.setMonth(cutoffDate.getMonth() - MAX_AGE_MONTHS);\n\nconst kept = [];\nconst stats = { dropped_investments: 0, dropped_inactive: 0, dropped_operator: 0, dropped_conflict: 0 };\n\nfor (const item of $input.all()) {\n  const lead = item.json || {};\n  const raw = lead.raw || {};\n  const name = lead.full_name || 'unknown';\n  const fundName = String(lead.company || '').trim().toLowerCase();\n\n  const totalFundingCount = Number(raw.total_funding_count ?? raw.num_investments ?? raw.num_exits ?? 0);\n  const lastFundingDateRaw = raw.last_funding_date || raw.last_investment_date || raw.last_funding_on || null;\n  const primaryJobTitle = String(raw.primary_job_title || raw.title || '');\n  const primaryOrg = String(raw.primary_organization_name || raw.primary_organization || raw.organization || '');\n\n  // Rule 1: fewer than 3 total investments\n  if (totalFundingCount < MIN_INVESTMENTS) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: fewer than 3 total investments (count=${totalFundingCount})`);\n    stats.dropped_investments++;\n    continue;\n  }\n\n  // Rule 2: last investment older than 12 months\n  if (!lastFundingDateRaw) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (no last_funding_date on record)`);\n    stats.dropped_inactive++;\n    continue;\n  }\n  const lastFundingDate = new Date(lastFundingDateRaw);\n  if (isNaN(lastFundingDate.getTime()) || lastFundingDate < cutoffDate) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: inactive investor (last_funding_date=${lastFundingDateRaw})`);\n    stats.dropped_inactive++;\n    continue;\n  }\n\n  // Rule 3: full-time operator (has an operator title at an org that is not their own fund)\n  const titleLower = primaryJobTitle.toLowerCase();\n  const orgLower = primaryOrg.trim().toLowerCase();\n  const isOperatorTitle = OPERATOR_TITLES.some(t => titleLower.includes(t.toLowerCase()));\n  if (isOperatorTitle && orgLower && orgLower !== fundName) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: full-time operator (${primaryJobTitle} at ${primaryOrg})`);\n    stats.dropped_operator++;\n    continue;\n  }\n\n  // Rule 4: conflict of interest (primary org is one of the BigCo AI labs)\n  const hasConflict = DISALLOWED_ORGS.some(o => orgLower.includes(o.toLowerCase()));\n  if (hasConflict) {\n    console.log(`[P2.1 qualify] DROPPED ${name}: conflict of interest (primary_organization=${primaryOrg})`);\n    stats.dropped_conflict++;\n    continue;\n  }\n\n  kept.push(item);\n}\n\nconsole.log(`[P2.1 qualify] kept ${kept.length} | dropped_investments=${stats.dropped_investments} dropped_inactive=${stats.dropped_inactive} dropped_operator=${stats.dropped_operator} dropped_conflict=${stats.dropped_conflict}`);\nreturn kept;"
       }
     },
     {
@@ -628,7 +642,7 @@
       "main": [
         [
           {
-            "node": "Loop Over Leads",
+            "node": "Qualify Leads",
             "type": "main",
             "index": 0
           }
@@ -799,6 +813,17 @@
           }
         ],
         []
+      ]
+    },
+    "Qualify Leads": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
