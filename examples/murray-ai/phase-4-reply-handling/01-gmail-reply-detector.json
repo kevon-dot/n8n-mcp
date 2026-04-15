@@ -64,7 +64,12 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ query: $json.query, variables: $json.variables }) }}",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
     },
     {
       "id": "filter-eligible",
@@ -188,7 +193,9 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": { "timeout": 60000 }
-      }
+      },
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-slack-post",
@@ -265,12 +272,81 @@
       "retryOnFail": true,
       "maxTries": 4,
       "waitBetweenTries": 2000
+    },
+    {
+      "id": "build-alert-lookup-p41",
+      "name": "Build Alert — Monday Lookup Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-360, 380],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Monday',\n  sub_provider: 'Leads lookup by threadId',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P4.1 Gmail Reply Detector',\n  node_name: 'Monday - Lookup by Thread',\n  context: `Looking up Leads row for Gmail threadId ${$('Build Thread Lookup').item.json._gmail.threadId}. Reply cannot be routed while this fails.`,\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-alert-claude-p41",
+      "name": "Build Alert — Claude Draft Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [680, 380],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Anthropic',\n  sub_provider: 'Reply draft',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P4.1 Gmail Reply Detector',\n  node_name: 'Anthropic - Draft Reply',\n  context: `Drafting reply for ${$('Claude Draft System').item.json.context.sender_name} (${$('Claude Draft System').item.json.context.sender_email}). Lead is already marked Qualified; approval card will not post until this is resolved.`,\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-p51-p41",
+      "name": "Call P5.1 API Error Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [940, 380],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_5_API_ERROR_ALERT_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "provider": "={{ $json.provider }}",
+            "sub_provider": "={{ $json.sub_provider }}",
+            "status_code": "={{ $json.status_code }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "node_name": "={{ $json.node_name }}",
+            "context": "={{ $json.context }}",
+            "error_body": "={{ $json.error_body }}"
+          },
+          "schema": [
+            { "id": "provider", "type": "string", "displayName": "provider" },
+            { "id": "sub_provider", "type": "string", "displayName": "sub_provider" },
+            { "id": "status_code", "type": "number", "displayName": "status_code" },
+            { "id": "workflow_name", "type": "string", "displayName": "workflow_name" },
+            { "id": "node_name", "type": "string", "displayName": "node_name" },
+            { "id": "context", "type": "string", "displayName": "context" },
+            { "id": "error_body", "type": "string", "displayName": "error_body" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
     "Gmail Trigger": { "main": [[{ "node": "Build Thread Lookup", "type": "main", "index": 0 }]] },
     "Build Thread Lookup": { "main": [[{ "node": "Monday - Lookup by Thread", "type": "main", "index": 0 }]] },
-    "Monday - Lookup by Thread": { "main": [[{ "node": "Filter Eligible Reply", "type": "main", "index": 0 }]] },
+    "Monday - Lookup by Thread": {
+      "main": [
+        [{ "node": "Filter Eligible Reply", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Monday Lookup Fail", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Alert — Monday Lookup Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
+    "Build Alert — Claude Draft Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
     "Filter Eligible Reply": {
       "main": [[
         { "node": "P1.3 Mark as Qualified", "type": "main", "index": 0 },
@@ -281,7 +357,12 @@
     "Build Stop Follow-Ups": { "main": [[{ "node": "Monday - Stop Follow-Ups", "type": "main", "index": 0 }]] },
     "Claude Draft System": { "main": [[{ "node": "Build Claude Draft Request", "type": "main", "index": 0 }]] },
     "Build Claude Draft Request": { "main": [[{ "node": "Anthropic - Draft Reply", "type": "main", "index": 0 }]] },
-    "Anthropic - Draft Reply": { "main": [[{ "node": "Build Slack Approval Post", "type": "main", "index": 0 }]] },
+    "Anthropic - Draft Reply": {
+      "main": [
+        [{ "node": "Build Slack Approval Post", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Claude Draft Fail", "type": "main", "index": 0 }]
+      ]
+    },
     "Build Slack Approval Post": { "main": [[{ "node": "Slack - Post Approval Card", "type": "main", "index": 0 }]] },
     "Slack - Post Approval Card": { "main": [[{ "node": "Build Persist Routing", "type": "main", "index": 0 }]] },
     "Build Persist Routing": { "main": [[{ "node": "Monday - Persist Routing", "type": "main", "index": 0 }]] }

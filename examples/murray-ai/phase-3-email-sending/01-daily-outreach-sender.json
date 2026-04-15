@@ -149,7 +149,9 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": { "timeout": 60000 }
-      }
+      },
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
     },
     {
       "id": "parse-claude",
@@ -388,6 +390,56 @@
       },
       "continueOnFail": true,
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "build-alert-anthropic-p31",
+      "name": "Build Alert — Anthropic Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1260, 400],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Anthropic',\n  sub_provider: 'Email generation',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P3.1 Daily Outreach Sender',\n  node_name: 'Anthropic - Generate Email',\n  context: `Generating outreach email for ${$('Claude System Prompt').item.json.lead_name} (${$('Claude System Prompt').item.json.email})`,\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-p51-p31",
+      "name": "Call P5.1 API Error Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1520, 400],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_5_API_ERROR_ALERT_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "provider": "={{ $json.provider }}",
+            "sub_provider": "={{ $json.sub_provider }}",
+            "status_code": "={{ $json.status_code }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "node_name": "={{ $json.node_name }}",
+            "context": "={{ $json.context }}",
+            "error_body": "={{ $json.error_body }}"
+          },
+          "schema": [
+            { "id": "provider", "type": "string", "displayName": "provider" },
+            { "id": "sub_provider", "type": "string", "displayName": "sub_provider" },
+            { "id": "status_code", "type": "number", "displayName": "status_code" },
+            { "id": "workflow_name", "type": "string", "displayName": "workflow_name" },
+            { "id": "node_name", "type": "string", "displayName": "node_name" },
+            { "id": "context", "type": "string", "displayName": "context" },
+            { "id": "error_body", "type": "string", "displayName": "error_body" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -404,7 +456,14 @@
     "Wait Spacing": { "main": [[{ "node": "Claude System Prompt", "type": "main", "index": 0 }]] },
     "Claude System Prompt": { "main": [[{ "node": "Build Claude Request", "type": "main", "index": 0 }]] },
     "Build Claude Request": { "main": [[{ "node": "Anthropic - Generate Email", "type": "main", "index": 0 }]] },
-    "Anthropic - Generate Email": { "main": [[{ "node": "Parse Claude Output", "type": "main", "index": 0 }]] },
+    "Anthropic - Generate Email": {
+      "main": [
+        [{ "node": "Parse Claude Output", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Anthropic Fail", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Alert — Anthropic Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
+    "Call P5.1 API Error Alert": { "main": [[{ "node": "Loop Over Leads", "type": "main", "index": 0 }]] },
     "Parse Claude Output": { "main": [[{ "node": "Read Deck PDF", "type": "main", "index": 0 }]] },
     "Read Deck PDF": { "main": [[{ "node": "Gmail - Send Outreach", "type": "main", "index": 0 }]] },
     "Gmail - Send Outreach": { "main": [[{ "node": "Build Update Contacts", "type": "main", "index": 0 }]] },

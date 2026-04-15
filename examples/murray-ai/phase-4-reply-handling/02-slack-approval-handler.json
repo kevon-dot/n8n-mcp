@@ -72,7 +72,9 @@
       },
       "retryOnFail": true,
       "maxTries": 4,
-      "waitBetweenTries": 2000
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
     },
     {
       "id": "extract-lead-context",
@@ -306,13 +308,69 @@
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {}
       }
+    },
+    {
+      "id": "build-alert-lookup-p42",
+      "name": "Build Alert — Monday Lookup Fail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-300, 420],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  provider: 'Monday',\n  sub_provider: 'Leads lookup by Approval Slack TS',\n  status_code: Number(($json.error && $json.error.httpCode) || $json.httpCode || $json.statusCode || 0),\n  workflow_name: 'P4.2 Slack Approval Handler',\n  node_name: 'Monday - Lookup By Approval TS',\n  context: `Routing approval reaction ts=${$('Build Monday Lookup').item.json._target_ts} from channel ${$('Build Monday Lookup').item.json._channel}. Approval cannot be routed while this fails.`,\n  error_body: JSON.stringify($json).slice(0, 300)\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "call-p51-p42",
+      "name": "Call P5.1 API Error Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [-40, 420],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.PHASE_5_API_ERROR_ALERT_WORKFLOW_ID }}",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "value": {
+            "provider": "={{ $json.provider }}",
+            "sub_provider": "={{ $json.sub_provider }}",
+            "status_code": "={{ $json.status_code }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "node_name": "={{ $json.node_name }}",
+            "context": "={{ $json.context }}",
+            "error_body": "={{ $json.error_body }}"
+          },
+          "schema": [
+            { "id": "provider", "type": "string", "displayName": "provider" },
+            { "id": "sub_provider", "type": "string", "displayName": "sub_provider" },
+            { "id": "status_code", "type": "number", "displayName": "status_code" },
+            { "id": "workflow_name", "type": "string", "displayName": "workflow_name" },
+            { "id": "node_name", "type": "string", "displayName": "node_name" },
+            { "id": "context", "type": "string", "displayName": "context" },
+            { "id": "error_body", "type": "string", "displayName": "error_body" }
+          ]
+        },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
     "Slack Trigger": { "main": [[{ "node": "Route Event", "type": "main", "index": 0 }]] },
     "Route Event": { "main": [[{ "node": "Build Monday Lookup", "type": "main", "index": 0 }]] },
     "Build Monday Lookup": { "main": [[{ "node": "Monday - Lookup By Approval TS", "type": "main", "index": 0 }]] },
-    "Monday - Lookup By Approval TS": { "main": [[{ "node": "Extract Lead Context", "type": "main", "index": 0 }]] },
+    "Monday - Lookup By Approval TS": {
+      "main": [
+        [{ "node": "Extract Lead Context", "type": "main", "index": 0 }],
+        [{ "node": "Build Alert — Monday Lookup Fail", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Alert — Monday Lookup Fail": { "main": [[{ "node": "Call P5.1 API Error Alert", "type": "main", "index": 0 }]] },
     "Extract Lead Context": { "main": [[{ "node": "Switch Route", "type": "main", "index": 0 }]] },
     "Switch Route": {
       "main": [
