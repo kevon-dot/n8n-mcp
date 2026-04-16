@@ -8,7 +8,7 @@
       "typeVersion": 1,
       "position": [-900, -340],
       "parameters": {
-        "content": "# Lead Finder\n\nFinds angel investor leads from Crunchbase, enriches emails via Hunter.io, and posts each qualified lead to Slack for review.\n\n## Required env vars (n8n Cloud: Settings → Variables)\n```\nAPIFY_TOKEN=<your apify token>\nAPIFY_CRUNCHBASE_ACTOR_ID=curious_coder/crunchbase-scraper\nHUNTER_API_KEY=<your hunter.io key>\nHUNTER_MIN_CONFIDENCE=0.9\nSLACK_BOT_TOKEN=<xoxb- bot token>\nSLACK_CHANNEL_ID=C0ASZ6R2K6E\nLEAD_FETCH_LIMIT=3\n```\n\nSet `LEAD_FETCH_LIMIT=3` for smoke test, bump to 50 for production.\n\n## How to run\nClick **Execute Workflow** manually. Or toggle the Schedule Trigger on to run daily at 6 AM PT.\n\n## What you see in Slack\nOne message per qualified lead with name, company, email, confidence score, and Crunchbase categories.",
+        "content": "# Lead Finder\n\nFinds angel investor leads from Crunchbase, enriches emails via Hunter.io, and posts each qualified lead to Slack for review.\n\n## Required env vars (n8n Cloud: Settings → Variables)\n```\nAPIFY_TOKEN=<your apify token>\nAPIFY_CRUNCHBASE_ACTOR_ID=curious_coder/crunchbase-scraper\nCRUNCHBASE_COOKIE=<your crunchbase session cookie>\ner/crunchbase-scraper\nHUNTER_API_KEY=<your hunter.io key>\nHUNTER_MIN_CONFIDENCE=0.9\nSLACK_BOT_TOKEN=<xoxb- bot token>\nSLACK_CHANNEL_ID=C0ASZ6R2K6E\nLEAD_FETCH_LIMIT=3\n```\n\nSet `LEAD_FETCH_LIMIT=3` for smoke test, bump to 50 for production.\n\n## How to run\nClick **Execute Workflow** manually. Or toggle the Schedule Trigger on to run daily at 6 AM PT.\n\n## What you see in Slack\nOne message per qualified lead with name, company, email, confidence score, and Crunchbase categories.",
         "height": 560,
         "width": 400
       }
@@ -39,7 +39,7 @@
       "position": [-180, 0],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  startUrls: [{ url: 'https://www.crunchbase.com/discover/principal.investors/6d45d82e0ccb840db702bbfae4302d01' }],\n  maxItems: parseInt($env.LEAD_FETCH_LIMIT || '50', 10),\n  proxyConfiguration: { useApifyProxy: true }\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  startUrls: [{ url: 'https://www.crunchbase.com/discover/principal.investors/6d45d82e0ccb840db702bbfae4302d01' }],\n  maxItems: parseInt($env.LEAD_FETCH_LIMIT || '50', 10),\n  cookie: $env.CRUNCHBASE_COOKIE\n}) }}",
         "options": {}
       }
     },
