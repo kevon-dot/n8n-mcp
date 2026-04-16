@@ -8,7 +8,7 @@
       "typeVersion": 1,
       "position": [-1640, -480],
       "parameters": {
-        "content": "# Phase 3.1 — Daily Outreach Sender\n\nRuns daily at 8:00 AM PT. Reads up to `DAILY_SEND_LIMIT` (default 15) High-confidence leads from Contacts Board (status = `Queued for Outreach`), generates a personalized cold email via Claude, sends via Gmail with the Murray AI deck attached, captures the Gmail `threadId`, and pushes the lead into Leads Board (group `New Pipeline`) via P1.2.\n\nSends are spaced `SEND_SPACING_MINUTES` apart (default 12) so all 15 finish by ~11 AM PT.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nGMAIL_SENDER=kevon@trymurmurai.app\nDECK_PDF_PATH=/files/Murray_AI_Pre-Seed_Deck.pdf\nDAILY_SEND_LIMIT=15\nSEND_SPACING_MINUTES=12\nPHASE_1_MOVE_TO_LEADS_WORKFLOW_ID=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (sender = kevon@trymurmurai.app)\n- `Monday.com API`\n- Anthropic via API key in env (no n8n credential needed for the HTTP node)\n\n## Pre-flight\n1. Place the deck PDF at the path in `DECK_PDF_PATH` inside the n8n container. If using docker-compose, mount a host folder to `/files`.\n2. Confirm SPF/DKIM/DMARC on `trymurmurai.app` are passing — cold sending without auth = spam.\n3. Smoke test: set `DAILY_SEND_LIMIT=1` and verify one email lands cleanly before flipping to 15.\n\n## System prompt\nThe Claude system prompt lives in the **\"Claude System Prompt\"** Set node — edit there in n8n UI to iterate on the Murray AI positioning without redeploying.",
+        "content": "# Phase 3.1 — Daily Outreach Sender\n\nRuns daily at 8:00 AM PT. Reads up to `DAILY_SEND_LIMIT` (default 15) High-confidence leads from Contacts Board (status = `Queued for Outreach`), generates a personalized cold email via Claude, sends via Gmail with the Murray AI deck attached, captures the Gmail `threadId`, and pushes the lead into Leads Board (group `New Pipeline`) via P1.2.\n\nSends are spaced `SEND_SPACING_MINUTES` apart (default 12) so all 15 finish by ~11 AM PT.\n\n## Required env\n```\nANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_MODEL=claude-sonnet-4-20250514\nGMAIL_SENDER=kevon@trymurmurai.app\nDECK_PDF_URL=/files/Murray_AI_Pre-Seed_Deck.pdf\nDAILY_SEND_LIMIT=15\nSEND_SPACING_MINUTES=12\nPHASE_1_MOVE_TO_LEADS_WORKFLOW_ID=...\n```\n\n## Required credentials\n- `Gmail OAuth2` (sender = kevon@trymurmurai.app)\n- `Monday.com API`\n- Anthropic via API key in env (no n8n credential needed for the HTTP node)\n\n## Pre-flight\n1. Upload the deck PDF to Google Drive (or S3 / Dropbox) and set `DECK_PDF_URL` to the direct-download URL. The workflow fetches it via HTTP at send time.\n2. Confirm SPF/DKIM/DMARC on `trymurmurai.app` are passing — cold sending without auth = spam.\n3. Smoke test: set `DAILY_SEND_LIMIT=1` and verify one email lands cleanly before flipping to 15.\n\n## System prompt\nThe Claude system prompt lives in the **\"Claude System Prompt\"** Set node — edit there in n8n UI to iterate on the Murray AI positioning without redeploying.",
         "height": 1100,
         "width": 460
       }
@@ -166,13 +166,21 @@
     },
     {
       "id": "read-pdf",
-      "name": "Read Deck PDF",
-      "type": "n8n-nodes-base.readBinaryFile",
-      "typeVersion": 1,
+      "name": "Fetch Deck PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [1520, 200],
       "parameters": {
-        "filePath": "={{ $env.DECK_PDF_PATH || '/files/Murray_AI_Pre-Seed_Deck.pdf' }}",
-        "dataPropertyName": "deck"
+        "method": "GET",
+        "url": "={{ $env.DECK_PDF_URL }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "deck"
+            }
+          }
+        }
       }
     },
     {
