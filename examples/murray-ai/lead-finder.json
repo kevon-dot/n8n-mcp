@@ -8,8 +8,8 @@
       "typeVersion": 1,
       "position": [-900, -340],
       "parameters": {
-        "content": "# Lead Finder\n\nFinds angel investor leads from Crunchbase, enriches emails via Hunter.io, and posts each qualified lead to Slack for review.\n\n## Required env vars (n8n Cloud: Settings → Variables)\n```\nAPIFY_TOKEN=<your apify token>\nAPIFY_CRUNCHBASE_ACTOR_ID=curious_coder/crunchbase-scraper\nCRUNCHBASE_COOKIE=<your crunchbase session cookie>\ner/crunchbase-scraper\nHUNTER_API_KEY=<your hunter.io key>\nHUNTER_MIN_CONFIDENCE=0.9\nSLACK_BOT_TOKEN=<xoxb- bot token>\nSLACK_CHANNEL_ID=C0ASZ6R2K6E\nLEAD_FETCH_LIMIT=3\n```\n\nSet `LEAD_FETCH_LIMIT=3` for smoke test, bump to 50 for production.\n\n## How to run\nClick **Execute Workflow** manually. Or toggle the Schedule Trigger on to run daily at 6 AM PT.\n\n## What you see in Slack\nOne message per qualified lead with name, company, email, confidence score, and Crunchbase categories.",
-        "height": 560,
+        "content": "# Lead Finder\n\nFinds angel investor leads from Crunchbase, enriches emails via Hunter.io, and posts each qualified lead to Slack for review.\n\n## Setup\nOpen the **Config** node (first node after triggers) and fill in your API keys and settings. Everything is in that one node — no env vars or Enterprise plan needed.\n\n## How to run\nClick **Execute Workflow** manually. Or toggle the Schedule Trigger on to run daily at 6 AM PT.\n\n## What you see in Slack\nOne message per qualified lead with name, company, email, confidence score, and Crunchbase categories.\n\n## Crunchbase cookie\nThe cookie expires every few days. When leads stop flowing, log into crunchbase.com in Chrome, open DevTools (F12) → Network tab → reload → click any request → copy the full Cookie header value → paste into the Config node.",
+        "height": 520,
         "width": 400
       }
     },
@@ -32,14 +32,26 @@
       }
     },
     {
-      "id": "build-input",
-      "name": "Build Crunchbase Input",
+      "id": "config",
+      "name": "Config",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [-180, 0],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  startUrls: [{ url: 'https://www.crunchbase.com/discover/principal.investors/6d45d82e0ccb840db702bbfae4302d01' }],\n  maxItems: parseInt($env.LEAD_FETCH_LIMIT || '50', 10),\n  cookie: $env.CRUNCHBASE_COOKIE\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  APIFY_TOKEN: 'PASTE_YOUR_APIFY_TOKEN_HERE',\n  APIFY_CRUNCHBASE_ACTOR_ID: 'curious_coder/crunchbase-scraper',\n  CRUNCHBASE_COOKIE: 'PASTE_YOUR_CRUNCHBASE_COOKIE_HERE',\n  HUNTER_API_KEY: 'PASTE_YOUR_HUNTER_KEY_HERE',\n  HUNTER_MIN_CONFIDENCE: 0.9,\n  SLACK_BOT_TOKEN: 'PASTE_YOUR_xoxb_BOT_TOKEN_HERE',\n  SLACK_CHANNEL_ID: 'C0ASZ6R2K6E',\n  LEAD_FETCH_LIMIT: 3\n}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-input",
+      "name": "Build Crunchbase Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [80, 0],
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({\n  startUrls: [{ url: 'https://www.crunchbase.com/discover/principal.investors/6d45d82e0ccb840db702bbfae4302d01' }],\n  maxItems: parseInt($json.LEAD_FETCH_LIMIT || '50', 10),\n  cookie: $json.CRUNCHBASE_COOKIE,\n  _config: $json\n}) }}",
         "options": {}
       }
     },
@@ -48,17 +60,17 @@
       "name": "Apify — Crunchbase",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [80, 0],
+      "position": [340, 0],
       "parameters": {
         "method": "POST",
-        "url": "=https://api.apify.com/v2/acts/{{ $env.APIFY_CRUNCHBASE_ACTOR_ID }}/run-sync-get-dataset-items?token={{ $env.APIFY_TOKEN }}&timeout=300",
+        "url": "=https://api.apify.com/v2/acts/{{ $('Config').item.json.APIFY_CRUNCHBASE_ACTOR_ID }}/run-sync-get-dataset-items?token={{ $('Config').item.json.APIFY_TOKEN }}&timeout=300",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [{ "name": "Content-Type", "value": "application/json" }]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json) }}",
+        "jsonBody": "={{ JSON.stringify({ startUrls: $json.startUrls, maxItems: $json.maxItems, cookie: $json.cookie }) }}",
         "options": { "timeout": 320000 }
       }
     },
@@ -67,10 +79,10 @@
       "name": "Normalize Leads",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [340, 0],
+      "position": [600, 0],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const items = Array.isArray($input.first().json) ? $input.first().json : ($input.first().json.items || []);\nconsole.log(`[Lead Finder] Crunchbase returned ${items.length} raw results`);\n\nfunction pickName(it) { return it.full_name || it.person_name || it.name || `${it.first_name || ''} ${it.last_name || ''}`.trim() || null; }\nfunction pickCompany(it) { return it.primary_organization_name || it.primary_organization || it.organization || it.company || null; }\nfunction pickDomain(it) {\n  const url = it.website || it.domain || it.organization_website || it.primary_organization_website || '';\n  if (!url) return null;\n  try { return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\\./, ''); }\n  catch { return url.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0]; }\n}\nfunction splitName(full) {\n  if (!full) return { first: '', last: '' };\n  const parts = full.trim().split(/\\s+/);\n  return { first: parts[0] || '', last: parts.slice(1).join(' ') || '' };\n}\n\nconst leads = items.map(it => {\n  const full = pickName(it);\n  const { first, last } = splitName(full);\n  return {\n    json: {\n      full_name: full,\n      first_name: first,\n      last_name: last,\n      company: pickCompany(it),\n      domain: pickDomain(it),\n      categories: (it.categories || it.investor_categories || []).join(', '),\n      crunchbase_url: it.url || it.crunchbase_url || '',\n      raw: it\n    }\n  };\n}).filter(r => r.json.full_name && r.json.domain);\n\nconsole.log(`[Lead Finder] ${leads.length} leads have name + domain`);\nreturn leads;"
+        "jsCode": "const items = Array.isArray($input.first().json) ? $input.first().json : ($input.first().json.items || []);\nconsole.log(`[Lead Finder] Crunchbase returned ${items.length} raw results`);\n\n// Carry config through for downstream nodes\nconst config = $('Config').item.json;\n\nfunction pickName(it) { return it.full_name || it.person_name || it.name || `${it.first_name || ''} ${it.last_name || ''}`.trim() || null; }\nfunction pickCompany(it) { return it.primary_organization_name || it.primary_organization || it.organization || it.company || null; }\nfunction pickDomain(it) {\n  const url = it.website || it.domain || it.organization_website || it.primary_organization_website || '';\n  if (!url) return null;\n  try { return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\\./, ''); }\n  catch { return url.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0]; }\n}\nfunction splitName(full) {\n  if (!full) return { first: '', last: '' };\n  const parts = full.trim().split(/\\s+/);\n  return { first: parts[0] || '', last: parts.slice(1).join(' ') || '' };\n}\n\nconst leads = items.map(it => {\n  const full = pickName(it);\n  const { first, last } = splitName(full);\n  return {\n    json: {\n      full_name: full,\n      first_name: first,\n      last_name: last,\n      company: pickCompany(it),\n      domain: pickDomain(it),\n      categories: (it.categories || it.investor_categories || []).join(', '),\n      crunchbase_url: it.url || it.crunchbase_url || '',\n      _config: config,\n      raw: it\n    }\n  };\n}).filter(r => r.json.full_name && r.json.domain);\n\nconsole.log(`[Lead Finder] ${leads.length} leads have name + domain`);\nreturn leads;"
       }
     },
     {
@@ -78,7 +90,7 @@
       "name": "Per Lead",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
-      "position": [600, 0],
+      "position": [860, 0],
       "parameters": { "batchSize": 1, "options": {} }
     },
     {
@@ -86,7 +98,7 @@
       "name": "Hunter.io — Find Email",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [860, 100],
+      "position": [1120, 100],
       "parameters": {
         "method": "GET",
         "url": "https://api.hunter.io/v2/email-finder",
@@ -96,7 +108,7 @@
             { "name": "domain", "value": "={{ $json.domain }}" },
             { "name": "first_name", "value": "={{ $json.first_name }}" },
             { "name": "last_name", "value": "={{ $json.last_name }}" },
-            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+            { "name": "api_key", "value": "={{ $json._config.HUNTER_API_KEY }}" }
           ]
         },
         "options": { "timeout": 30000 }
@@ -109,10 +121,10 @@
       "name": "Got a Good Email?",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1120, 100],
+      "position": [1380, 100],
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const lead = $('Per Lead').item.json;\nconst hunterData = ($json.data || {});\nconst email = hunterData.email || null;\nconst score = Number(hunterData.score || 0);\nconst threshold = Number($env.HUNTER_MIN_CONFIDENCE || 0.9);\nconst minScore = threshold <= 1 ? threshold * 100 : threshold;\n\nif (!email || score < minScore) {\n  console.log(`[Lead Finder] SKIP ${lead.full_name}: ${!email ? 'no email found' : `score ${score} < ${minScore}`}`);\n  return [];\n}\n\nconsole.log(`[Lead Finder] QUALIFIED ${lead.full_name}: ${email} (score=${score})`);\nreturn [{ json: {\n  full_name: lead.full_name,\n  company: lead.company || 'Independent',\n  email,\n  confidence: score,\n  categories: lead.categories,\n  crunchbase_url: lead.crunchbase_url,\n  domain: lead.domain\n}}];"
+        "jsCode": "const lead = $('Per Lead').item.json;\nconst config = lead._config || $('Config').item.json;\nconst hunterData = ($json.data || {});\nconst email = hunterData.email || null;\nconst score = Number(hunterData.score || 0);\nconst threshold = Number(config.HUNTER_MIN_CONFIDENCE || 0.9);\nconst minScore = threshold <= 1 ? threshold * 100 : threshold;\n\nif (!email || score < minScore) {\n  console.log(`[Lead Finder] SKIP ${lead.full_name}: ${!email ? 'no email found' : `score ${score} < ${minScore}`}`);\n  return [];\n}\n\nconsole.log(`[Lead Finder] QUALIFIED ${lead.full_name}: ${email} (score=${score})`);\nreturn [{ json: {\n  full_name: lead.full_name,\n  company: lead.company || 'Independent',\n  email,\n  confidence: score,\n  categories: lead.categories,\n  crunchbase_url: lead.crunchbase_url,\n  domain: lead.domain,\n  _config: config\n}}];"
       }
     },
     {
@@ -120,10 +132,10 @@
       "name": "Build Slack Message",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [1380, 100],
+      "position": [1640, 100],
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({\n  channel: $env.SLACK_CHANNEL_ID,\n  text: `*${$json.full_name}*  |  ${$json.company}\\n:email:  ${$json.email}  (${$json.confidence}% confidence)\\n:briefcase:  ${$json.categories || 'no categories listed'}\\n:link:  ${$json.crunchbase_url || $json.domain}`\n}) }}",
+        "jsonOutput": "={{ JSON.stringify({\n  channel: $json._config.SLACK_CHANNEL_ID,\n  text: `*${$json.full_name}*  |  ${$json.company}\\n:email:  ${$json.email}  (${$json.confidence}% confidence)\\n:briefcase:  ${$json.categories || 'no categories listed'}\\n:link:  ${$json.crunchbase_url || $json.domain}`,\n  _slackToken: $json._config.SLACK_BOT_TOKEN\n}) }}",
         "options": {}
       }
     },
@@ -132,27 +144,28 @@
       "name": "Post to Slack",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1640, 100],
+      "position": [1900, 100],
       "parameters": {
         "method": "POST",
         "url": "https://slack.com/api/chat.postMessage",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $json._slackToken }}" },
             { "name": "Content-Type", "value": "application/json; charset=utf-8" }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json) }}",
+        "jsonBody": "={{ JSON.stringify({ channel: $json.channel, text: $json.text }) }}",
         "options": {}
       }
     }
   ],
   "connections": {
-    "Run Manually": { "main": [[{ "node": "Build Crunchbase Input", "type": "main", "index": 0 }]] },
-    "Daily 6 AM PT": { "main": [[{ "node": "Build Crunchbase Input", "type": "main", "index": 0 }]] },
+    "Run Manually": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Daily 6 AM PT": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Build Crunchbase Input", "type": "main", "index": 0 }]] },
     "Build Crunchbase Input": { "main": [[{ "node": "Apify — Crunchbase", "type": "main", "index": 0 }]] },
     "Apify — Crunchbase": { "main": [[{ "node": "Normalize Leads", "type": "main", "index": 0 }]] },
     "Normalize Leads": { "main": [[{ "node": "Per Lead", "type": "main", "index": 0 }]] },
